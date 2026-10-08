@@ -33,19 +33,21 @@ With `/fleet worktrees on`, every worker edits its own git worktree on its own b
 - **git**, if you will use worktrees, in any project you use them in.
 - Nothing else: no Node, npm or build step. Claude Code compiles the TypeScript itself.
 
-### Option A — from GitHub (once this repository is published)
+### Option A — from GitHub
 
 Inside any Claude Code session, at the prompt:
 
 ```
-/plugin install agent-fleet --marketplace <owner>/<repo>
+/plugin install agent-fleet --marketplace mbelsis/Claude-Fleet
 ```
 
 Answer `y` to add the marketplace, then choose **user** scope so it loads in every project. It is active straight away.
 
+The repository is private, so the laptop must be able to clone it: signed in to GitHub with access to `mbelsis/Claude-Fleet` (for example through `gh auth login`, a credential manager, or an SSH key). If the install says the marketplace cannot be fetched, check access with `git clone https://github.com/mbelsis/Claude-Fleet.git` first.
+
 ### Option B — from a copy of this folder
 
-1. Get the folder onto the laptop: `git clone <url> "claude fleet"`, or copy the folder (a USB stick or a shared drive is fine).
+1. Get the folder onto the laptop: `git clone https://github.com/mbelsis/Claude-Fleet.git "claude fleet"`, or copy the folder (a USB stick or a shared drive is fine).
 2. In a terminal, register the folder as a plugin marketplace and install from it:
 
    ```bash
