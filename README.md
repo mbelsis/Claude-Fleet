@@ -2,7 +2,7 @@
 
 A Claude Code plugin that splits each task you give Claude across a fleet of subagents you configure — a lead planner, workers on the models you choose, a reviewer and a designer — and shows you what every one of them is doing.
 
-Version 0.6.1 · © 2026 Belsis Meletis · free to use, see [Licence and disclaimer](#licence-and-disclaimer). This is a test plugin: try it on work you can afford to redo.
+Version 0.7.0 · © 2026 Belsis Meletis · free to use, see [Licence and disclaimer](#licence-and-disclaimer). This is a test plugin: try it on work you can afford to redo.
 
 ## How a request flows
 

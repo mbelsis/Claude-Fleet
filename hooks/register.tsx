@@ -1644,7 +1644,7 @@ export const register: Register = on => {
 
     // Rows are laid out to the pane's width, so nothing wraps: what does not fit on the first
     // line moves to the lines under it, and every line is cut at the edge rather than wrapped.
-    const inner = Math.max(30, width - 2)
+    const inner = Math.max(30, width - 6)
     const descWidth = Math.max(8, inner - 64)
     const runRow = (run: FleetRun) => {
       const percent = percentOf(run)
@@ -1834,6 +1834,62 @@ export const register: Register = on => {
       )
     }
 
+    const onOff = (isOn: boolean) => (isOn ? '● on' : '○ off')
+    const pick = (label: string) => `${label} ▾`
+    // A bordered section with a bold title; the border takes the colour scheme's line colour.
+    const card = (title: string, titleColor: string, body: unknown, extra?: unknown) => (
+      <Box
+        flexDirection="column"
+        borderStyle="round"
+        borderColor={theme.line}
+        paddingX={1}
+        marginTop={1}
+      >
+        <Box columnGap={1}>
+          <Text color={titleColor} bold>
+            {title}
+          </Text>
+          {extra as never}
+        </Box>
+        {body as never}
+      </Box>
+    )
+    const leadRow = (
+      key: 'planner' | 'reviewer' | 'designer',
+      name: string,
+      lead: FleetLead,
+      keys: [string, string],
+      what: string,
+    ) => (
+      <Box columnGap={1}>
+        <Text color={ROLE_COLOR[key]} bold>
+          {fit(name, 9)}
+        </Text>
+        <Button
+          key={key}
+          hotkey={keys[0]}
+          variant={lead.isEnabled ? 'primary' : 'secondary'}
+          label={onOff(lead.isEnabled)}
+          onPress={() => toggleLead(key)}
+        />
+        <Button
+          key={`${key}-model`}
+          hotkey={keys[1]}
+          variant="primary"
+          label={pick(modelLabel(lead.model))}
+          onPress={() => cycleLead(key)}
+        />
+        <Text color={ink} dimColor wrap="truncate-end">
+          {what}
+        </Text>
+      </Box>
+    )
+    const slotRows: number[][] = []
+    fleet.models.forEach((_, i) => {
+      if (i % 3 === 0) slotRows.push([])
+      slotRows[slotRows.length - 1]!.push(i)
+    })
+
     return (
       <Box
         flexDirection="column"
@@ -1842,272 +1898,293 @@ export const register: Register = on => {
         paddingX={1}
         {...(theme.bg ? { backgroundColor: theme.bg } : {})}
       >
-        <Box>
+        <Box columnGap={1}>
           <Text color={ink} bold>
-            Plan{' '}
+            Fleet
           </Text>
           <Button
             key="toggle"
             hotkey="t"
-            variant="primary"
-            label={fleet.isEnabled ? 'On' : 'Off'}
+            variant={fleet.isEnabled ? 'primary' : 'secondary'}
+            label={fleet.isEnabled ? '● on' : '○ off'}
             onPress={() => savePlan($, current => ({ ...current, isEnabled: !current.isEnabled }))}
           />
-          <Text color={ink}>{`${NB}this project:${NB}`}</Text>
+          <Text color={ink} dimColor>
+            this project
+          </Text>
           <Button
             key="project"
             hotkey="u"
-            variant="primary"
-            label={projectOff ? 'off' : 'on'}
+            variant={projectOff ? 'secondary' : 'primary'}
+            label={onOff(!projectOff)}
             onPress={toggleProject}
           />
-          <Text color={ink}>{NB}</Text>
           <Button
             key="help"
             hotkey="h"
-            variant="primary"
-            label={showHelp ? 'hide help' : 'help'}
+            variant="secondary"
+            label={showHelp ? '? hide help' : '? help'}
             onPress={() => update($, isHelpOpen, open => !open)}
           />
-          <Text color={ink}>{NB}</Text>
           <Button
             key="theme"
             hotkey="b"
-            variant="primary"
-            label={`colours: ${theme.label}`}
+            variant="secondary"
+            label={`◐ ${theme.label}`}
             onPress={cycleTheme}
           />
         </Box>
-        <Box>
-          <Text color={ROLE_COLOR.planner} bold>{`Planner:${NB}`}</Text>
-          <Button
-            key="planner"
-            hotkey="p"
-            variant="primary"
-            label={planner.isEnabled ? 'On' : 'Off'}
-            onPress={() => toggleLead('planner')}
-          />
-          <Text color={ink}>{NB}</Text>
-          <Button
-            key="planner-model"
-            hotkey="o"
-            variant="primary"
-            label={modelLabel(planner.model)}
-            onPress={() => cycleLead('planner')}
-          />
-          <Text color={ink}>{`${NB}thinks first, plans jobs and waves`}</Text>
-        </Box>
-        <Box>
-          <Text color={ROLE_COLOR.reviewer} bold>{`Reviewer:${NB}`}</Text>
-          <Button
-            key="reviewer"
-            hotkey="r"
-            variant="primary"
-            label={reviewer.isEnabled ? 'On' : 'Off'}
-            onPress={() => toggleLead('reviewer')}
-          />
-          <Text color={ink}>{NB}</Text>
-          <Button
-            key="reviewer-model"
-            hotkey="e"
-            variant="primary"
-            label={modelLabel(reviewer.model)}
-            onPress={() => cycleLead('reviewer')}
-          />
-          <Text color={ink}>{`${NB}checks the combined result last`}</Text>
-        </Box>
-        <Box>
-          <Text color={ROLE_COLOR.designer} bold>{`Designer:${NB}`}</Text>
-          <Button
-            key="designer"
-            hotkey="d"
-            variant="primary"
-            label={designer.isEnabled ? 'On' : 'Off'}
-            onPress={() => toggleLead('designer')}
-          />
-          <Text color={ink}>{NB}</Text>
-          <Button
-            key="designer-model"
-            hotkey="n"
-            variant="primary"
-            label={modelLabel(designer.model)}
-            onPress={() => cycleLead('designer')}
-          />
-          <Text color={ink}>{`${NB}polishes the result into files, uploads nothing`}</Text>
-        </Box>
-        <Box>
-          <Text color={ink}>Workers: {fleet.models.length} </Text>
-          <Button key="fewer" hotkey="f" variant="primary" label="−" onPress={() => resize(-1)} />
-          <Button key="more" hotkey="m" variant="primary" label="+" onPress={() => resize(1)} />
-          <Text color={ink}>{`${NB}count:${NB}`}</Text>
-          <Button
-            key="auto"
-            hotkey="a"
-            variant="primary"
-            label={fleet.isAutoSize ? 'chosen per task' : 'always all'}
-            onPress={() =>
-              savePlan($, current => ({ ...current, isAutoSize: !current.isAutoSize }))
-            }
-          />
-        </Box>
-        {fleet.models.map((model, i) => (
-          <Box>
-            <Text color={ink}> Agent {i + 1}: </Text>
+        {projectOff && (
+          <Text color="warning">The fleet is off for this project (/fleet use on).</Text>
+        )}
+
+        {card(
+          'Lead agents',
+          ink,
+          <>
+            {leadRow(
+              'planner',
+              'Planner',
+              planner,
+              ['p', 'o'],
+              'thinks first, plans jobs and waves',
+            )}
+            {leadRow('reviewer', 'Reviewer', reviewer, ['r', 'e'], 'checks the combined result')}
+            {leadRow(
+              'designer',
+              'Designer',
+              designer,
+              ['d', 'n'],
+              'polishes into files, uploads nothing',
+            )}
+          </>,
+        )}
+
+        {card(
+          `Workers · ${fleet.models.length}`,
+          ink,
+          <>
+            <Box columnGap={1}>
+              <Button
+                key="fewer"
+                hotkey="f"
+                variant="secondary"
+                label="−"
+                onPress={() => resize(-1)}
+              />
+              <Button
+                key="more"
+                hotkey="m"
+                variant="secondary"
+                label="+"
+                onPress={() => resize(1)}
+              />
+              <Text color={ink} dimColor>
+                count
+              </Text>
+              <Button
+                key="auto"
+                hotkey="a"
+                variant="primary"
+                label={pick(fleet.isAutoSize ? 'chosen per task' : 'always all')}
+                onPress={() =>
+                  savePlan($, current => ({ ...current, isAutoSize: !current.isAutoSize }))
+                }
+              />
+            </Box>
+            {slotRows.map(row => (
+              <Box columnGap={3} marginTop={1}>
+                {row.map(i => (
+                  <Box columnGap={1}>
+                    <Text color={ink}>{`Agent ${i + 1}`}</Text>
+                    <Button
+                      key={`slot-${i}`}
+                      hotkey={i < 9 ? String(i + 1) : undefined}
+                      variant="primary"
+                      label={pick(modelLabel(fleet.models[i] ?? 'inherit'))}
+                      onPress={() =>
+                        savePlan($, current => ({
+                          ...current,
+                          models: current.models.map((m, j) => (j === i ? nextModel(m) : m)),
+                        }))
+                      }
+                    />
+                  </Box>
+                ))}
+              </Box>
+            ))}
+          </>,
+        )}
+
+        {card(
+          'Options',
+          ink,
+          <>
+            <Box columnGap={1}>
+              <Text color={ink}>Files</Text>
+              <Button
+                key="files"
+                hotkey="l"
+                variant={isFileHandoffOn(fleet) ? 'primary' : 'secondary'}
+                label={onOff(isFileHandoffOn(fleet))}
+                onPress={() =>
+                  savePlan($, current => ({ ...current, isFileHandoff: !isFileHandoffOn(current) }))
+                }
+              />
+              <Text color={ink}> Worktrees</Text>
+              <Button
+                key="worktrees"
+                hotkey="w"
+                variant={isWorktreesOn(fleet) ? 'primary' : 'secondary'}
+                label={onOff(isWorktreesOn(fleet))}
+                onPress={async () => $.ui.toast(await setWorktreesMode($, !isWorktreesOn(fleet)))}
+              />
+              <Text color={ink}> Messages</Text>
+              <Button
+                key="messages"
+                hotkey="v"
+                variant="primary"
+                label={pick(fleet.messages ?? 'full')}
+                onPress={() =>
+                  savePlan($, current => {
+                    const order = ['full', 'compact', 'quiet'] as const
+                    const at = order.indexOf(current.messages ?? 'full')
+                    return { ...current, messages: order[(at + 1) % order.length] }
+                  })
+                }
+              />
+            </Box>
+            <Text color={ink} dimColor wrap="truncate-end">
+              {`Budget ${
+                fleet.budgetUsd
+                  ? `${usdText(fleet.budgetUsd)} per request · ${fleet.budgetAction ?? 'warn'} at the limit`
+                  : 'none'
+              }  ·  notify ${fleet.notify ?? 'all'}  ·  set with /fleet budget, /fleet notify`}
+            </Text>
+          </>,
+        )}
+
+        {showHelp &&
+          card(
+            'Commands',
+            ink,
+            <>
+              {HELP_LINES.map(line => (
+                <Text color={ink} wrap="truncate-end">
+                  {line}
+                </Text>
+              ))}
+            </>,
+          )}
+
+        {card(
+          'Progress',
+          ink,
+          <>
+            {items.length === 0 && loose.length === 0 && (
+              <Text color={ink} dimColor>
+                No subagents yet. Send Claude a task while the fleet is on.
+              </Text>
+            )}
+            {latest !== undefined && requestLine(latest, true)}
+            {latestRuns.map(run => (
+              <Box flexDirection="column" marginTop={1}>
+                {runRow(run)}
+              </Box>
+            ))}
+            {peekPanel}
+            {earlier.length > 0 && <Text color={ink}>{NB}</Text>}
+            {earlier.map(request => requestLine(request, false))}
+            {loose.length > 0 && (
+              <Text color={ink} bold>
+                Other agents
+              </Text>
+            )}
+            {loose.slice(-5).map(runRow)}
+          </>,
+          <>
             <Button
-              key={`slot-${i}`}
-              hotkey={i < 9 ? String(i + 1) : undefined}
-              variant="primary"
-              label={modelLabel(model)}
-              onPress={() =>
-                savePlan($, current => ({
-                  ...current,
-                  models: current.models.map((m, j) => (j === i ? nextModel(m) : m)),
-                }))
-              }
+              key="clear"
+              variant="secondary"
+              hotkey="c"
+              label="✕ clear finished"
+              onPress={async () => {
+                await update($, runs, keep => keep.filter(run => run.status === 'running'))
+                await update($, requests, keep => keep.filter(request => request.endedAt === null))
+                await update($, peek, () => null)
+                await refreshStatus($)
+              }}
             />
-          </Box>
-        ))}
-        <Box>
-          <Text color={ink}>{`Files:${NB}`}</Text>
-          <Button
-            key="files"
-            hotkey="l"
-            variant="primary"
-            label={isFileHandoffOn(fleet) ? 'on' : 'off'}
-            onPress={() =>
-              savePlan($, current => ({ ...current, isFileHandoff: !isFileHandoffOn(current) }))
-            }
-          />
-          <Text color={ink}>{`${NB}worktrees:${NB}`}</Text>
-          <Button
-            key="worktrees"
-            hotkey="w"
-            variant="primary"
-            label={isWorktreesOn(fleet) ? 'on' : 'off'}
-            onPress={async () => $.ui.toast(await setWorktreesMode($, !isWorktreesOn(fleet)))}
-          />
-          <Text color={ink}>{`${NB}messages:${NB}`}</Text>
-          <Button
-            key="messages"
-            hotkey="v"
-            variant="primary"
-            label={fleet.messages ?? 'full'}
-            onPress={() =>
-              savePlan($, current => {
-                const order = ['full', 'compact', 'quiet'] as const
-                const at = order.indexOf(current.messages ?? 'full')
-                return { ...current, messages: order[(at + 1) % order.length] }
-              })
-            }
-          />
-        </Box>
-        <Text color={ink} wrap="truncate-end">
-          {`Budget:${NB}${
-            fleet.budgetUsd
-              ? `${usdText(fleet.budgetUsd)} per request · ${fleet.budgetAction ?? 'warn'} at the limit`
-              : 'none'
-          } (/fleet budget)`}
-        </Text>
-        <Text color={ink}>Press a model (or its number key) to change it.</Text>
-        {showHelp && <Text color={ink}>{NB}</Text>}
-        {showHelp && (
-          <Text color={ink} bold>
-            Commands
-          </Text>
+            <Button
+              key="history"
+              hotkey="y"
+              variant="secondary"
+              label={showHistory ? '◷ hide history' : '◷ history'}
+              onPress={() => update($, isHistoryOpen, open => !open)}
+            />
+          </>,
         )}
-        {showHelp && HELP_LINES.map(line => <Text color={ink}>{line}</Text>)}
-        <Text color={ink}>{NB}</Text>
-        <Box>
-          <Text color={ink} bold>
-            Progress{' '}
-          </Text>
-          <Button
-            key="clear"
-            variant="primary"
-            hotkey="c"
-            label="Clear finished"
-            onPress={async () => {
-              await update($, runs, keep => keep.filter(run => run.status === 'running'))
-              await update($, requests, keep => keep.filter(request => request.endedAt === null))
-              await update($, peek, () => null)
-              await refreshStatus($)
-            }}
-          />
-          <Text color={ink}>{NB}</Text>
-          <Button
-            key="history"
-            hotkey="y"
-            variant="primary"
-            label={showHistory ? 'hide history' : 'history'}
-            onPress={() => update($, isHistoryOpen, open => !open)}
-          />
-          {projectOff && <Text color="warning"> the fleet is off for this project</Text>}
-        </Box>
-        {items.length === 0 && loose.length === 0 && <Text color={ink}>No subagents yet.</Text>}
-        {latest !== undefined && requestLine(latest, true)}
-        {latestRuns.map(runRow)}
-        {peekPanel}
-        {earlier.map(request => requestLine(request, false))}
-        {loose.length > 0 && <Text color={ink}>Other agents</Text>}
-        {loose.slice(-5).map(runRow)}
-        {showHistory && <Text color={ink}>{NB}</Text>}
-        {showHistory && (
-          <Text color={ink} bold>
-            History · this project
-          </Text>
-        )}
-        {showHistory && pastHere.length === 0 && (
-          <Text color={ink}>No finished requests here yet.</Text>
-        )}
-        {pastHere.map(one => (
-          <Box>
-            <Text color={one.outcome === 'done' ? 'success' : 'warning'} wrap="truncate-end">
-              {one.outcome === 'done' ? '✓' : '■'}{' '}
-              {new Date(one.endedAt).toISOString().slice(5, 16).replace('T', ' ')}{' '}
-              {fit(one.title, Math.max(12, inner - 44))}{' '}
-              {fit(elapsedText(one.startedAt, one.endedAt), 6)} {fit(`${one.agents} ag`, 5)}{' '}
-              {one.cost ? usdText(one.cost) : ''}
-            </Text>
-            {one.runDir ? (
-              <>
-                <Text>{NB}</Text>
-                <Button
-                  key={`open-${one.id}`}
-                  dimColor
-                  plain
-                  label="open"
-                  onPress={() => openFolder($, one.runDir!)}
-                />
-              </>
-            ) : null}
-          </Box>
-        ))}
-        {unmerged.length > 0 && <Text color={ink}>{NB}</Text>}
-        {unmerged.length > 0 && (
-          <Box>
-            <Text color={ink} bold>
-              Worktrees with unmerged work{' '}
-            </Text>
+
+        {showHistory &&
+          card(
+            'History · this project',
+            ink,
+            <>
+              {pastHere.length === 0 && (
+                <Text color={ink} dimColor>
+                  No finished requests here yet.
+                </Text>
+              )}
+              {pastHere.map(one => (
+                <Box columnGap={1}>
+                  <Text color={one.outcome === 'done' ? 'success' : 'warning'} wrap="truncate-end">
+                    {one.outcome === 'done' ? '✓' : '■'}{' '}
+                    {new Date(one.endedAt).toISOString().slice(5, 16).replace('T', ' ')}{' '}
+                    {fit(one.title, Math.max(12, inner - 44))}{' '}
+                    {fit(elapsedText(one.startedAt, one.endedAt), 6)} {fit(`${one.agents} ag`, 5)}{' '}
+                    {one.cost ? usdText(one.cost) : ''}
+                  </Text>
+                  {one.runDir ? (
+                    <Button
+                      key={`open-${one.id}`}
+                      dimColor
+                      plain
+                      label="open"
+                      onPress={() => openFolder($, one.runDir!)}
+                    />
+                  ) : null}
+                </Box>
+              ))}
+            </>,
+          )}
+
+        {unmerged.length > 0 &&
+          card(
+            'Worktrees with unmerged work',
+            'warning',
+            <>
+              {unmerged.map(one => (
+                <Text color={one.status === 'conflict' ? 'error' : ink} wrap="truncate-end">
+                  • {fit(one.label, 8)} {fit(WORKTREE_LABEL[one.status], 15)} {one.commits}{' '}
+                  commit(s) · {one.branch}
+                  {one.note ? ` · ${one.note}` : ''}
+                </Text>
+              ))}
+            </>,
             <Button
               key="merge"
               hotkey="g"
               variant="primary"
-              label="Merge finished"
+              label="⇢ merge finished"
               onPress={async () => $.ui.toast((await mergeWorktrees($)).split('\n')[0] ?? '')}
-            />
-          </Box>
-        )}
-        {unmerged.map(one => (
-          <Text color={one.status === 'conflict' ? 'error' : ink} wrap="truncate-end">
-            {'  '}• {fit(one.label, 8)} {fit(WORKTREE_LABEL[one.status], 15)} {one.commits}{' '}
-            commit(s) · {one.branch}
-            {one.note ? ` · ${one.note}` : ''}
+            />,
+          )}
+
+        <Box marginTop={1}>
+          <Text color={ink} dimColor wrap="truncate-end">
+            Agent fleet {VERSION} · {COPYRIGHT} · press a ▾ button (or its number key) to change it
           </Text>
-        ))}
-        <Text color={ink}>{NB}</Text>
-        <Text color={ink} dimColor wrap="truncate-end">
-          Agent fleet {VERSION} · {COPYRIGHT}
-        </Text>
+        </Box>
       </Box>
     )
   })

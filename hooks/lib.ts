@@ -12,7 +12,7 @@ import type {
 } from '../types'
 
 /** Shown in the pane's footer; kept in step with .claude-plugin/plugin.json. */
-export const VERSION = '0.6.1'
+export const VERSION = '0.7.0'
 export const COPYRIGHT = '© Belsis Meletis'
 
 export const MODELS: FleetModel[] = ['inherit', 'opus', 'sonnet', 'haiku', 'fable']
@@ -38,14 +38,14 @@ export const isFileHandoffOn = (fleet: FleetPlan): boolean => fleet.isFileHandof
 export const isWorktreesOn = (fleet: FleetPlan): boolean => fleet.isWorktrees === true
 
 /** Background and text colours of the pane; `default` leaves both to the theme. */
-export const THEMES: Record<string, { label: string; bg?: string; text: string }> = {
-  default: { label: 'theme', text: 'text' },
-  dark: { label: 'dark', bg: '#1e1f22', text: '#e6e6e6' },
-  navy: { label: 'navy', bg: '#0f1b2d', text: '#e6edf7' },
-  slate: { label: 'slate', bg: '#2b303b', text: '#eceff4' },
-  forest: { label: 'forest', bg: '#14251c', text: '#e3efe6' },
-  light: { label: 'light', bg: '#f6f6f3', text: '#1f2328' },
-  paper: { label: 'paper', bg: '#fdf6e3', text: '#3b3a36' },
+export const THEMES: Record<string, { label: string; bg?: string; text: string; line: string }> = {
+  default: { label: 'theme', text: 'text', line: 'subtle' },
+  dark: { label: 'dark', bg: '#1e1f22', text: '#e6e6e6', line: '#4a4d55' },
+  navy: { label: 'navy', bg: '#0f1b2d', text: '#e6edf7', line: '#34507a' },
+  slate: { label: 'slate', bg: '#2b303b', text: '#eceff4', line: '#5a6478' },
+  forest: { label: 'forest', bg: '#14251c', text: '#e3efe6', line: '#3d6650' },
+  light: { label: 'light', bg: '#f6f6f3', text: '#1f2328', line: '#c9c9c0' },
+  paper: { label: 'paper', bg: '#fdf6e3', text: '#3b3a36', line: '#d6c9a2' },
 }
 export const THEME_KEYS = Object.keys(THEMES)
 /** Navy unless the person picked another scheme. */

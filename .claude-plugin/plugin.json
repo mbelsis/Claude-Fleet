@@ -1,6 +1,6 @@
 {
   "name": "agent-fleet",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Split each task across a fleet of subagents you configure (planner, workers in waves, reviewer, designer), with progress, budgets, run folders, history and safe git worktrees",
   "types": "./types/index.d.ts",
   "author": {

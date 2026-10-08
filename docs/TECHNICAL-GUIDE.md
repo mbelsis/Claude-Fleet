@@ -2,7 +2,7 @@
 
 How the fleet is built, how each feature works inside, the safety decisions behind it, and how to extend it. For using it, see the [README](../README.md).
 
-Version 0.6.1 · © 2026 Belsis Meletis
+Version 0.7.0 · © 2026 Belsis Meletis
 
 ---
 
