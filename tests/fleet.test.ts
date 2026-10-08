@@ -30,6 +30,7 @@ import {
   designerGuard,
   DESIGNER_TYPE,
   titleOf,
+  compactLine,
 } from '../hooks/register'
 
 // The kit's `$` takes an event's full input; the plugin's calls take the short form.
@@ -986,4 +987,61 @@ test('pause stops an agent at its next tool call, keeps the request open, and re
   sendFails = true
   await $.command.run({ command: 'fleet', args: 'resume' } as never)
   expect(spawned.at(-1)).toBe('worker (rerun)')
+})
+
+test('an agent message folds to one line naming who, what and its first words', async () => {
+  const line = compactLine(
+    '[Subagent hand-back] The text below…\n  ## Job 2 done\nDetails',
+    'peer-send-message',
+    'a6c2a0f5',
+    undefined,
+    80,
+  )
+  expect(line.startsWith('▸ @a6c2a0f5 — ## Job 2 done')).toBe(true)
+  expect(line.endsWith('(ctrl+o for all)')).toBe(true)
+  const notice = compactLine(
+    '<task-notification>…',
+    'task-notification',
+    undefined,
+    { status: 'completed', durationMs: 151_000 },
+    80,
+  )
+  expect(notice.startsWith('▸ agent completed · 2m31s')).toBe(true)
+})
+
+test('in compact mode agent rows are folded; the footer carries the copyright', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  host(on, [])
+  await $.command.run({ command: 'fleet', args: 'messages compact' } as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const row = await $.ui.mount({
+      plugin: 'agent-fleet',
+      surface,
+      component: 'UserMessage',
+      requestId: 'm1',
+      props: {
+        text: 'Agent "Job 1" finished\nLong report…',
+        origin: { kind: 'task-notification' },
+        isExpanded: false,
+        task: { id: 't1', status: 'completed', durationMs: 60_000 },
+      },
+      viewport: { columns: 100, rows: 40 },
+    } as never)
+    expect(await row.find({ type: 'Text', text: /▸ agent completed · 1m0s/ })).toBeDefined()
+    await row.unmount()
+    const pane = await $.ui.mount({
+      plugin: 'agent-fleet',
+      surface,
+      component: 'Pane',
+      requestId: 'agent-fleet',
+      props: { bodyColumns: 100 },
+      viewport: { columns: 140, rows: 50 },
+    } as never)
+    expect(await pane.find({ type: 'Text', text: /© Belsis Meletis/ })).toBeDefined()
+    expect((await pane.find({ key: 'messages' }))?.text).toContain('compact')
+    await pane.unmount()
+  }
+  const help = await $.command.run({ command: 'fleet', args: 'help' } as never)
+  expect(help.text).toContain('© Belsis Meletis')
 })

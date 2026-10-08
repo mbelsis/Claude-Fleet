@@ -55,6 +55,11 @@ import {
   taskOf,
   THEME_KEYS,
   DEFAULT_THEME,
+  AGENT_ORIGINS,
+  compactLine,
+  COPYRIGHT,
+  QUIET_SECTION,
+  VERSION,
   ROLE_COLOR,
   titleOf,
   DESIGNER_PROMPT,
@@ -246,7 +251,7 @@ async function announce($: EngineInterface, entry: FleetHistoryEntry): Promise<v
     `${elapsedText(entry.startedAt, entry.endedAt)} · ${entry.agents} agents` +
     (entry.cost ? ` · ${usdText(entry.cost)}` : '') +
     (entry.runDir ? ` · ${entry.runDir}` : '')
-  $.ui.log(line)
+  if ((await read($, plan)).messages !== 'quiet') $.ui.log(line)
   if (mode === 'off' || entry.endedAt - entry.startedAt < NOTIFY_AFTER_MS) return
   if (mode === 'all' || mode === 'sound') {
     const asset = entry.outcome === 'done' ? 'fx/done.wav' : 'fx/alert.wav'
@@ -979,7 +984,23 @@ export const register: Register = on => {
       await savePlan($, current => ({ ...current, theme: word }))
       return { text: `Fleet pane colours: ${word}.` }
     }
-    if (arg === 'help') return { text: ['Agent fleet commands:', ...HELP_LINES].join('\n') }
+    if (arg === 'help') {
+      return { text: [`Agent fleet ${VERSION} ${COPYRIGHT} — commands:`, ...HELP_LINES].join('\n') }
+    }
+    if (head === 'messages') {
+      if (word !== 'full' && word !== 'compact' && word !== 'quiet') {
+        return { text: 'Use /fleet messages full | compact | quiet' }
+      }
+      await savePlan($, current => ({ ...current, messages: word }))
+      return {
+        text:
+          word === 'full'
+            ? 'Agent messages are shown in full.'
+            : word === 'compact'
+              ? 'Agent messages are folded to one line each; press ctrl+o to read one in full.'
+              : 'Agent messages are folded, and Claude keeps its own progress updates to one line.',
+      }
+    }
     if (arg !== '') {
       const parsed = parsePlan(arg, await read($, plan))
       if (typeof parsed === 'string') return { text: `${parsed}. /fleet help lists every command.` }
@@ -1043,11 +1064,16 @@ export const register: Register = on => {
     const composed = await next(e)
     if (!(await isFleetActive($))) return composed
     const fleet = await read($, plan)
+    const quiet =
+      fleet.messages === 'quiet'
+        ? [{ id: 'agent-fleet:quiet', text: QUIET_SECTION, scope: 'session' as const }]
+        : []
 
     return {
       sections: [
         ...composed.sections,
         { id: 'agent-fleet:plan', text: planText(fleet), scope: 'session' as const },
+        ...quiet,
       ],
     }
   })
@@ -1439,6 +1465,21 @@ export const register: Register = on => {
       }
     }
     return next(e)
+  })
+
+  // Agents' completion notices and reports, folded to one line each when the person asks;
+  // ctrl+o shows the full row, and what Claude reads is never changed.
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    const mode = (await read($, plan)).messages ?? 'full'
+    const kind = e.props.origin.kind
+    if (mode === 'full' || e.props.isExpanded || !AGENT_ORIGINS.includes(kind)) return next(e)
+    const { Text } = $.ui.resolve(e)
+    const width = Math.max(40, e.viewport?.columns ?? 100)
+    return (
+      <Text dimColor wrap="truncate-end">
+        {compactLine(e.props.text, kind, e.props.from?.name, e.props.task, width)}
+      </Text>
+    )
   })
 
   // The status band above the prompt: one request's overall progress.
@@ -1931,6 +1972,20 @@ export const register: Register = on => {
             label={isWorktreesOn(fleet) ? 'on' : 'off'}
             onPress={async () => $.ui.toast(await setWorktreesMode($, !isWorktreesOn(fleet)))}
           />
+          <Text color={ink}> messages: </Text>
+          <Button
+            key="messages"
+            hotkey="v"
+            variant="primary"
+            label={fleet.messages ?? 'full'}
+            onPress={() =>
+              savePlan($, current => {
+                const order = ['full', 'compact', 'quiet'] as const
+                const at = order.indexOf(current.messages ?? 'full')
+                return { ...current, messages: order[(at + 1) % order.length] }
+              })
+            }
+          />
           <Text color={ink}>
             {' '}
             budget:{' '}
@@ -2036,6 +2091,10 @@ export const register: Register = on => {
             {one.note ? ` · ${one.note}` : ''}
           </Text>
         ))}
+        <Text color={ink}> </Text>
+        <Text color={ink} dimColor wrap="truncate-end">
+          Agent fleet {VERSION} · {COPYRIGHT}
+        </Text>
       </Box>
     )
   })

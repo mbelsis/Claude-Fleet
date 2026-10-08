@@ -11,6 +11,10 @@ import type {
   FleetSteps,
 } from '../types'
 
+/** Shown in the pane's footer; kept in step with .claude-plugin/plugin.json. */
+export const VERSION = '0.6.0'
+export const COPYRIGHT = '© Belsis Meletis'
+
 export const MODELS: FleetModel[] = ['inherit', 'opus', 'sonnet', 'haiku', 'fable']
 export const LEAD_MODELS: FleetModel[] = ['opus', 'fable', 'sonnet', 'inherit']
 export const MAX_AGENTS = 10
@@ -660,6 +664,45 @@ export const ROLE_COLOR: Partial<Record<FleetRole, string>> = {
   designer: '#e0569b',
 }
 
+/** Transcript rows that agents create: their completion notices and the reports they send. */
+export const AGENT_ORIGINS: readonly string[] = [
+  'task-notification',
+  'peer',
+  'peer-send-message',
+  'coordinator',
+]
+
+/** One line standing for a folded agent message: who, what happened, and its first words. */
+export function compactLine(
+  text: string,
+  origin: string,
+  from: string | undefined,
+  task: { status?: string; durationMs?: number } | undefined,
+  width: number,
+): string {
+  const who = from ? `@${from}` : origin === 'task-notification' ? 'agent' : 'message'
+  const status = task?.status ? ` ${task.status}` : ''
+  const time = task?.durationMs ? ` · ${elapsedText(0, task.durationMs)}` : ''
+  const first =
+    text
+      .replace(/<[^>]+>/g, ' ')
+      .split('\n')
+      .map(one => one.trim())
+      .find(one => one !== '' && !/^\[?subagent hand-back\]?/i.test(one)) ?? ''
+  const head = `▸ ${who}${status}${time} — `
+  const tail = '  (ctrl+o for all)'
+  const room = Math.max(10, width - head.length - tail.length)
+  return head + (first.length > room ? `${first.slice(0, room - 1)}…` : first) + tail
+}
+
+/** Added to the system prompt in quiet mode, so Claude's own updates are short too. */
+export const QUIET_SECTION = [
+  '# Agent fleet: quiet progress (set by the user)',
+  'While fleet agents are running, keep each update to the user to one short line (what started, ',
+  'what finished, what is next). Do not restate what the agents reported; put the substance in ',
+  'the final answer. This applies to the main conversation only.',
+].join('\n')
+
 /** Every /fleet parameter, as the command's own help. */
 export const HELP_LINES: readonly string[] = [
   '/fleet                     open the pane',
@@ -678,6 +721,7 @@ export const HELP_LINES: readonly string[] = [
   '/fleet merge               merge finished worktrees into the base branch, stop on conflict',
   "/fleet detach N            remove job N's worktree but keep its branch",
   '/fleet notify on|off|sound|banner   announce finished requests (30 s or longer)',
+  "/fleet messages full|compact|quiet  how much of the agents' messages the transcript shows",
   '/fleet history [all]       past requests here (or everywhere) and their run folders',
   '/fleet theme NAME          pane colours: ' + Object.keys(THEMES).join(', '),
   '/fleet pause | resume      pause running agents at their next tool call; resume them',
@@ -686,5 +730,6 @@ export const HELP_LINES: readonly string[] = [
   '/fleet help                show this list',
   'Pane keys: t plan · p/o planner · r/e reviewer · d/n designer · f/m fewer/more · a count',
   '           1–9 agent model',
-  '           b colours · s stop all · x pause or resume all · c clear · y history · h help',
+  '           b colours · s stop all · x pause or resume all · c clear · y history · v messages',
+  '           h help',
 ]

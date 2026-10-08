@@ -10,6 +10,7 @@ A Claude Code plugin that splits each task across a fleet of subagents you confi
 - **Run folders** (on by default): each request gets `~/.claude/fleet-runs/<project>/<date>-<title>/` holding the request, the plan, each worker's result (`job-N.md`), the combined result and a summary. Later waves receive the result files of the jobs they depend on.
 - **Progress:** a pane listing each request and its agents (model, completion, time, tool calls, tokens, the job each was given), a status band above the prompt with an overall progress bar and live cost, and Stop controls.
 - **Pause and resume:** *pause* on an agent (or *Pause all* / `x` on a request, or `/fleet pause`) stops it at a safe point, and *resume* (or `/fleet resume`) lets it carry on with everything it had already read and done. See *Pausing agents* below for exactly when the pause happens.
+- **Quieter transcript:** `/fleet messages compact` folds each agent's completion notice and report into one dim line (who, what happened, its first words); press **ctrl+o** to read any of them in full. `/fleet messages quiet` also asks Claude to keep its own progress updates to one line while agents run, and drops the routine "finished" line (the chime and banner still come). Only what you see changes: Claude still reads every report in full. `full` restores the normal view; the pane's *messages* button (`v`) cycles the three.
 - **Role colours:** in the pane the planner (violet), reviewer (blue) and designer (pink) stand out from the workers; the labels of their settings rows use the same colours as a key.
 - **Peek and rerun:** open any agent to see its latest output and tool call; rerun a finished agent with the same brief plus a note ("cut it to 6,000 words").
 - **Budget:** a spending limit per request in US dollars (`/fleet budget 5`), read every second from the same running total `/cost` shows, counted from the moment you send the request. It warns at 80% and at the limit; with `/fleet budget stop` it stops the request's agents, refuses any further agent until your next message, and tells Claude why. Each event also leaves a line in the transcript.
@@ -134,6 +135,7 @@ Uninstalling leaves your run folders (`~/.claude/fleet-runs/`) and any fleet wor
 /fleet merge               merge finished worktrees into the base branch, stop on conflict
 /fleet detach N            remove job N's worktree but keep its branch
 /fleet notify on|off|sound|banner   announce finished requests (30 s or longer)
+/fleet messages full|compact|quiet  how much of the agents' messages the transcript shows
 /fleet history [all]       past requests here (or everywhere) and their run folders
 /fleet theme NAME          pane colours
 /fleet pause | resume      pause running agents at their next tool call; resume them

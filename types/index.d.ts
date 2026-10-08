@@ -26,6 +26,8 @@ export type FleetPlan = {
   budgetAction?: 'warn' | 'stop'
   /** How a finished request is announced: sound and banner (default), one of them, or nothing. */
   notify?: 'all' | 'sound' | 'banner' | 'off'
+  /** How much of the agents' messages the transcript shows. Full unless changed. */
+  messages?: 'full' | 'compact' | 'quiet'
 }
 
 export type FleetStatus = 'running' | 'paused' | 'done' | 'failed' | 'stopped'
