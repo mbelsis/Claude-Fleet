@@ -1,0 +1,5 @@
+{
+  "name": "belsis-plugins",
+  "owner": { "name": "Meletis Belsis" },
+  "plugins": [{ "name": "agent-fleet", "source": "./" }]
+}
