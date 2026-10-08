@@ -1045,3 +1045,25 @@ test('in compact mode agent rows are folded; the footer carries the copyright', 
   const help = await $.command.run({ command: 'fleet', args: 'help' } as never)
   expect(help.text).toContain('© Belsis Meletis')
 })
+
+test('workers launched together take different slots and models', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  host(on, [])
+  let n = 0
+  on('agent.spawn', async (_$, e) => {
+    // Let the other launches overtake this one, as parallel Agent calls do.
+    await Promise.resolve()
+    return { model: e.model ?? 'parent', agentId: `s${++n}` }
+  })
+  on('prompt.submit', (_$, e) => e as never)
+  await $.command.run({ command: 'fleet', args: '3 sonnet sonnet opus' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  await $.prompt.submit(composer('Three parts'))
+  const all = await Promise.all(
+    ['a', 'b', 'c'].map(d => $.agent.spawn({ prompt: d, description: d } as never)),
+  )
+  expect(all.map(one => one.model).sort()).toEqual(['opus', 'sonnet', 'sonnet'])
+  const fourth = await $.agent.spawn({ prompt: 'd', description: 'd' } as never)
+  expect(fourth.deny).toContain('allows 3 workers')
+})

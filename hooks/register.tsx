@@ -81,6 +81,8 @@ import type { Phase } from './lib'
 export * from './lib'
 
 const PANE = 'agent-fleet'
+/** A space the renderer keeps at the edge of a Text, where a plain one is dropped. */
+const NB = '\u00a0'
 const KEPT_RUNS = 80
 const KEPT_REQUESTS = 6
 /** How long the status band stays up after a request finished. */
@@ -766,6 +768,10 @@ async function tickBudget($: EngineInterface): Promise<void> {
 export const register: Register = on => {
   // Slots the main loop has handed out since the person's last prompt, when no job is named.
   let slotCursor = 0
+  // Slots handed out but not yet recorded, per request. Agents launched together reach the
+  // spawn hook at the same moment, before any of them is in the state; without this they all
+  // took slot 1 (and its model).
+  const reserved = new Map<string, Set<number>>()
   // Reruns waiting for their agent.spawn, by description.
   const rerunQueue = new Map<string, FleetRun>()
   let ticks = 0
@@ -1190,20 +1196,24 @@ export const register: Register = on => {
           }
         }
       }
-      if (mine.length >= fleet.models.length) {
+      const pending = (reserved.get(requestId ?? '') ?? new Set<number>()).size
+      if (Math.max(mine.length, pending) >= fleet.models.length) {
         return {
           deny:
             `The agent fleet allows ${fleet.models.length} workers per request and all are in ` +
             'use. Finish with the agents already running, or the user can change it with /fleet.',
         }
       }
-      const taken = new Set(mine.map(run => run.slot))
+      const held = reserved.get(requestId ?? '') ?? new Set<number>()
+      const taken = new Set<number | null>([...mine.map(run => run.slot), ...held])
       slot =
         job !== null && job <= fleet.models.length && !taken.has(job - 1)
           ? job - 1
           : (Array.from({ length: fleet.models.length }, (_, i) => i).find(i => !taken.has(i)) ??
             slotCursor)
       slotCursor = Math.max(slotCursor, slot + 1)
+      held.add(slot)
+      reserved.set(requestId ?? '', held)
       const model = fleet.models[slot]
       let prompt = e.prompt + PROGRESS_NOTE
       const label = job !== null ? `job ${job}` : `agent ${slot + 1}`
@@ -1222,6 +1232,7 @@ export const register: Register = on => {
       if (isWorktreesOn(fleet) && request) {
         const made = await createWorktree($, request, job ?? slot + 1, label)
         if (typeof made === 'string') {
+          reserved.get(requestId ?? '')?.delete(slot)
           return {
             deny:
               `Agent fleet could not create a worktree for ${label}: ${made}. Fix the repository ` +
@@ -1236,7 +1247,14 @@ export const register: Register = on => {
       if (model !== undefined && model !== 'inherit' && !e.fork) input = { ...input, model }
     }
 
-    const started = await next(input)
+    let started: Awaited<ReturnType<typeof next>>
+    try {
+      started = await next(input)
+    } catch (error) {
+      if (slot !== null && role === 'worker' && !rerunOf)
+        reserved.get(requestId ?? '')?.delete(slot)
+      throw error
+    }
     if (started.deny === undefined && started.agentId !== undefined) {
       const run: FleetRun = {
         id: started.agentId,
@@ -1279,6 +1297,8 @@ export const register: Register = on => {
       if (wt) await finishWorktree($, wt)
     }
 
+    // The run is in the state now (or was refused): its slot no longer needs holding.
+    if (slot !== null && role === 'worker' && !rerunOf) reserved.get(requestId ?? '')?.delete(slot)
     return started
   }).catch(($, e, next) => next(e))
 
@@ -1625,7 +1645,7 @@ export const register: Register = on => {
     // Rows are laid out to the pane's width, so nothing wraps: what does not fit on the first
     // line moves to the lines under it, and every line is cut at the edge rather than wrapped.
     const inner = Math.max(30, width - 2)
-    const descWidth = Math.max(8, inner - 54)
+    const descWidth = Math.max(8, inner - 64)
     const runRow = (run: FleetRun) => {
       const percent = percentOf(run)
       const replaced = isReplaced(run, list)
@@ -1658,7 +1678,7 @@ export const register: Register = on => {
               {fit(shortModel(run.model), 10)} {fit(percent === null ? '—' : `${percent}%`, 4)}{' '}
               {fit(elapsedText(run.startedAt, run.endedAt ?? at), 6)}
             </Text>
-            <Text> </Text>
+            <Text>{NB}</Text>
             <Button
               key={`peek-${run.id}`}
               dimColor
@@ -1668,7 +1688,7 @@ export const register: Register = on => {
             />
             {(run.status === 'running' || run.status === 'paused') && (
               <>
-                <Text> </Text>
+                <Text>{NB}</Text>
                 <Button
                   key={`pause-${run.id}`}
                   dimColor
@@ -1684,7 +1704,7 @@ export const register: Register = on => {
             )}
             {(run.status === 'running' || run.status === 'paused') && (
               <>
-                <Text> </Text>
+                <Text>{NB}</Text>
                 <Button
                   key={`stop-${run.id}`}
                   dimColor
@@ -1791,7 +1811,7 @@ export const register: Register = on => {
                 }}
               />
             )}
-            {isRunning && <Text> </Text>}
+            {isRunning && <Text>{NB}</Text>}
             {isRunning && (
               <Button
                 key="stop-all"
@@ -1833,7 +1853,7 @@ export const register: Register = on => {
             label={fleet.isEnabled ? 'On' : 'Off'}
             onPress={() => savePlan($, current => ({ ...current, isEnabled: !current.isEnabled }))}
           />
-          <Text color={ink}> this project: </Text>
+          <Text color={ink}>{`${NB}this project:${NB}`}</Text>
           <Button
             key="project"
             hotkey="u"
@@ -1841,7 +1861,7 @@ export const register: Register = on => {
             label={projectOff ? 'off' : 'on'}
             onPress={toggleProject}
           />
-          <Text color={ink}> </Text>
+          <Text color={ink}>{NB}</Text>
           <Button
             key="help"
             hotkey="h"
@@ -1849,7 +1869,7 @@ export const register: Register = on => {
             label={showHelp ? 'hide help' : 'help'}
             onPress={() => update($, isHelpOpen, open => !open)}
           />
-          <Text color={ink}> </Text>
+          <Text color={ink}>{NB}</Text>
           <Button
             key="theme"
             hotkey="b"
@@ -1859,9 +1879,7 @@ export const register: Register = on => {
           />
         </Box>
         <Box>
-          <Text color={ROLE_COLOR.planner} bold>
-            Planner:
-          </Text>
+          <Text color={ROLE_COLOR.planner} bold>{`Planner:${NB}`}</Text>
           <Button
             key="planner"
             hotkey="p"
@@ -1869,7 +1887,7 @@ export const register: Register = on => {
             label={planner.isEnabled ? 'On' : 'Off'}
             onPress={() => toggleLead('planner')}
           />
-          <Text color={ink}> </Text>
+          <Text color={ink}>{NB}</Text>
           <Button
             key="planner-model"
             hotkey="o"
@@ -1877,12 +1895,10 @@ export const register: Register = on => {
             label={modelLabel(planner.model)}
             onPress={() => cycleLead('planner')}
           />
-          <Text color={ink}> thinks first, plans jobs and waves</Text>
+          <Text color={ink}>{`${NB}thinks first, plans jobs and waves`}</Text>
         </Box>
         <Box>
-          <Text color={ROLE_COLOR.reviewer} bold>
-            Reviewer:
-          </Text>
+          <Text color={ROLE_COLOR.reviewer} bold>{`Reviewer:${NB}`}</Text>
           <Button
             key="reviewer"
             hotkey="r"
@@ -1890,7 +1906,7 @@ export const register: Register = on => {
             label={reviewer.isEnabled ? 'On' : 'Off'}
             onPress={() => toggleLead('reviewer')}
           />
-          <Text color={ink}> </Text>
+          <Text color={ink}>{NB}</Text>
           <Button
             key="reviewer-model"
             hotkey="e"
@@ -1898,12 +1914,10 @@ export const register: Register = on => {
             label={modelLabel(reviewer.model)}
             onPress={() => cycleLead('reviewer')}
           />
-          <Text color={ink}> checks the combined result last</Text>
+          <Text color={ink}>{`${NB}checks the combined result last`}</Text>
         </Box>
         <Box>
-          <Text color={ROLE_COLOR.designer} bold>
-            Designer:
-          </Text>
+          <Text color={ROLE_COLOR.designer} bold>{`Designer:${NB}`}</Text>
           <Button
             key="designer"
             hotkey="d"
@@ -1911,7 +1925,7 @@ export const register: Register = on => {
             label={designer.isEnabled ? 'On' : 'Off'}
             onPress={() => toggleLead('designer')}
           />
-          <Text color={ink}> </Text>
+          <Text color={ink}>{NB}</Text>
           <Button
             key="designer-model"
             hotkey="n"
@@ -1919,13 +1933,13 @@ export const register: Register = on => {
             label={modelLabel(designer.model)}
             onPress={() => cycleLead('designer')}
           />
-          <Text color={ink}> polishes the result into files, uploads nothing</Text>
+          <Text color={ink}>{`${NB}polishes the result into files, uploads nothing`}</Text>
         </Box>
         <Box>
           <Text color={ink}>Workers: {fleet.models.length} </Text>
           <Button key="fewer" hotkey="f" variant="primary" label="−" onPress={() => resize(-1)} />
           <Button key="more" hotkey="m" variant="primary" label="+" onPress={() => resize(1)} />
-          <Text color={ink}> count: </Text>
+          <Text color={ink}>{`${NB}count:${NB}`}</Text>
           <Button
             key="auto"
             hotkey="a"
@@ -1954,7 +1968,7 @@ export const register: Register = on => {
           </Box>
         ))}
         <Box>
-          <Text color={ink}>Files: </Text>
+          <Text color={ink}>{`Files:${NB}`}</Text>
           <Button
             key="files"
             hotkey="l"
@@ -1964,7 +1978,7 @@ export const register: Register = on => {
               savePlan($, current => ({ ...current, isFileHandoff: !isFileHandoffOn(current) }))
             }
           />
-          <Text color={ink}> worktrees: </Text>
+          <Text color={ink}>{`${NB}worktrees:${NB}`}</Text>
           <Button
             key="worktrees"
             hotkey="w"
@@ -1972,7 +1986,7 @@ export const register: Register = on => {
             label={isWorktreesOn(fleet) ? 'on' : 'off'}
             onPress={async () => $.ui.toast(await setWorktreesMode($, !isWorktreesOn(fleet)))}
           />
-          <Text color={ink}> messages: </Text>
+          <Text color={ink}>{`${NB}messages:${NB}`}</Text>
           <Button
             key="messages"
             hotkey="v"
@@ -1986,24 +2000,23 @@ export const register: Register = on => {
               })
             }
           />
-          <Text color={ink}>
-            {' '}
-            budget:{' '}
-            {fleet.budgetUsd
-              ? `${usdText(fleet.budgetUsd)} · ${fleet.budgetAction ?? 'warn'}`
-              : 'none'}{' '}
-            (/fleet budget)
-          </Text>
         </Box>
+        <Text color={ink} wrap="truncate-end">
+          {`Budget:${NB}${
+            fleet.budgetUsd
+              ? `${usdText(fleet.budgetUsd)} per request · ${fleet.budgetAction ?? 'warn'} at the limit`
+              : 'none'
+          } (/fleet budget)`}
+        </Text>
         <Text color={ink}>Press a model (or its number key) to change it.</Text>
-        {showHelp && <Text color={ink}> </Text>}
+        {showHelp && <Text color={ink}>{NB}</Text>}
         {showHelp && (
           <Text color={ink} bold>
             Commands
           </Text>
         )}
         {showHelp && HELP_LINES.map(line => <Text color={ink}>{line}</Text>)}
-        <Text color={ink}> </Text>
+        <Text color={ink}>{NB}</Text>
         <Box>
           <Text color={ink} bold>
             Progress{' '}
@@ -2020,7 +2033,7 @@ export const register: Register = on => {
               await refreshStatus($)
             }}
           />
-          <Text color={ink}> </Text>
+          <Text color={ink}>{NB}</Text>
           <Button
             key="history"
             hotkey="y"
@@ -2037,7 +2050,7 @@ export const register: Register = on => {
         {earlier.map(request => requestLine(request, false))}
         {loose.length > 0 && <Text color={ink}>Other agents</Text>}
         {loose.slice(-5).map(runRow)}
-        {showHistory && <Text color={ink}> </Text>}
+        {showHistory && <Text color={ink}>{NB}</Text>}
         {showHistory && (
           <Text color={ink} bold>
             History · this project
@@ -2057,7 +2070,7 @@ export const register: Register = on => {
             </Text>
             {one.runDir ? (
               <>
-                <Text> </Text>
+                <Text>{NB}</Text>
                 <Button
                   key={`open-${one.id}`}
                   dimColor
@@ -2069,7 +2082,7 @@ export const register: Register = on => {
             ) : null}
           </Box>
         ))}
-        {unmerged.length > 0 && <Text color={ink}> </Text>}
+        {unmerged.length > 0 && <Text color={ink}>{NB}</Text>}
         {unmerged.length > 0 && (
           <Box>
             <Text color={ink} bold>
@@ -2091,7 +2104,7 @@ export const register: Register = on => {
             {one.note ? ` · ${one.note}` : ''}
           </Text>
         ))}
-        <Text color={ink}> </Text>
+        <Text color={ink}>{NB}</Text>
         <Text color={ink} dimColor wrap="truncate-end">
           Agent fleet {VERSION} · {COPYRIGHT}
         </Text>

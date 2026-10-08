@@ -12,7 +12,7 @@ import type {
 } from '../types'
 
 /** Shown in the pane's footer; kept in step with .claude-plugin/plugin.json. */
-export const VERSION = '0.6.0'
+export const VERSION = '0.6.1'
 export const COPYRIGHT = '© Belsis Meletis'
 
 export const MODELS: FleetModel[] = ['inherit', 'opus', 'sonnet', 'haiku', 'fable']
