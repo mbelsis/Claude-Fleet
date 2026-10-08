@@ -1645,7 +1645,7 @@ export const register: Register = on => {
     // Rows are laid out to the pane's width, so nothing wraps: what does not fit on the first
     // line moves to the lines under it, and every line is cut at the edge rather than wrapped.
     const inner = Math.max(30, width - 6)
-    const descWidth = Math.max(8, inner - 64)
+    const descWidth = Math.max(8, inner - 38)
     const runRow = (run: FleetRun) => {
       const percent = percentOf(run)
       const replaced = isReplaced(run, list)
@@ -1678,7 +1678,11 @@ export const register: Register = on => {
               {fit(shortModel(run.model), 10)} {fit(percent === null ? '—' : `${percent}%`, 4)}{' '}
               {fit(elapsedText(run.startedAt, run.endedAt ?? at), 6)}
             </Text>
-            <Text>{NB}</Text>
+          </Box>
+          <Box columnGap={1}>
+            <Text color={STATUS_COLOR[run.status]} dimColor wrap="truncate-end">
+              {`${NB.repeat(5)}${fit(`${detail} · ${run.tools} tools`, Math.max(10, inner - 30))}`}
+            </Text>
             <Button
               key={`peek-${run.id}`}
               dimColor
@@ -1686,39 +1690,29 @@ export const register: Register = on => {
               label={peeked?.runId === run.id ? 'close' : 'peek'}
               onPress={() => openPeek(run)}
             />
-            {(run.status === 'running' || run.status === 'paused') && (
-              <>
-                <Text>{NB}</Text>
-                <Button
-                  key={`pause-${run.id}`}
-                  dimColor
-                  plain
-                  label={
-                    run.status === 'paused' ? 'resume' : run.pauseRequested ? 'pausing' : 'pause'
-                  }
-                  onPress={() =>
-                    run.status === 'paused' ? resumeRun($, run, rerunQueue) : pauseRun($, run)
-                  }
-                />
-              </>
-            )}
-            {(run.status === 'running' || run.status === 'paused') && (
-              <>
-                <Text>{NB}</Text>
-                <Button
-                  key={`stop-${run.id}`}
-                  dimColor
-                  plain
-                  label="stop"
-                  onPress={() => stopRun($, run)}
-                />
-              </>
-            )}
+            {run.status === 'running' || run.status === 'paused' ? (
+              <Button
+                key={`pause-${run.id}`}
+                dimColor
+                plain
+                label={
+                  run.status === 'paused' ? 'resume' : run.pauseRequested ? 'pausing' : 'pause'
+                }
+                onPress={() =>
+                  run.status === 'paused' ? resumeRun($, run, rerunQueue) : pauseRun($, run)
+                }
+              />
+            ) : null}
+            {run.status === 'running' || run.status === 'paused' ? (
+              <Button
+                key={`stop-${run.id}`}
+                dimColor
+                plain
+                label="stop"
+                onPress={() => stopRun($, run)}
+              />
+            ) : null}
           </Box>
-          <Text color={STATUS_COLOR[run.status]} dimColor wrap="truncate-end">
-            {'      '}
-            {detail} · {run.tools} tools
-          </Text>
           {run.task ? (
             <Text color={ink} wrap="truncate-end">
               {'      ↳ '}
@@ -2102,7 +2096,7 @@ export const register: Register = on => {
             )}
             {loose.slice(-5).map(runRow)}
           </>,
-          <>
+          [
             <Button
               key="clear"
               variant="secondary"
@@ -2114,15 +2108,15 @@ export const register: Register = on => {
                 await update($, peek, () => null)
                 await refreshStatus($)
               }}
-            />
+            />,
             <Button
               key="history"
               hotkey="y"
               variant="secondary"
               label={showHistory ? '◷ hide history' : '◷ history'}
               onPress={() => update($, isHistoryOpen, open => !open)}
-            />
-          </>,
+            />,
+          ],
         )}
 
         {showHistory &&

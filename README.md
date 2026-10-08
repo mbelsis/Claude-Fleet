@@ -28,37 +28,25 @@ Every stage is optional except the workers, and each lead agent (planner, review
 
 ## Screenshots
 
-`/fleet help` lists every command:
+The fleet pane: the lead agents (planner, reviewer, designer) each with a model, the workers and their models, and the options, beside `/fleet help`:
 
-![The list of fleet commands](Screenshots/01-fleet-help.png)
+![The fleet pane and its commands](Screenshots/01-pane.png)
 
-Three workers running in parallel. The pane shows the plan, each agent's model, progress, time, current step and the job it was given; the band above the prompt shows the request's overall progress and cost against its budget:
+A request starts: the planner (violet) is splitting "a 2-page PDF on ISO 27001 change management" into jobs. The band above the prompt shows the stage, time and cost against the $8 budget:
 
-![Three workers running](Screenshots/02-workers-running.png)
+![The planner at work](Screenshots/02-planning.png)
 
-The workers are done and Claude has combined their sections; the designer (pink) is now laying the result out as a PDF:
+The planner has finished and two workers run in parallel — the planner chose two jobs for this task — each on its own slot's model (sonnet and haiku), with its current step and the job it was given:
 
-![The designer stage](Screenshots/03-designer-stage.png)
+![Two workers running](Screenshots/03-workers-running.png)
 
-The designer paused with `/fleet pause`: it stopped at its next tool call, the request shows *Paused*, and *Resume all* is offered. Claude waits instead of finishing without it:
+Both workers are done, Claude has combined their drafts, and the designer (pink) is laying the result out as a PDF; here in the *slate* colour scheme:
 
-![A paused designer](Screenshots/04-paused.png)
+![The designer stage](Screenshots/04-designing.png)
 
-Colour schemes — *forest* here — and the copyright footer:
+What the designer produced — a two-page practitioner guide, built on the laptop and saved in the run folder's `design/`, nothing uploaded:
 
-![The forest colour scheme](Screenshots/05-forest-colours.png)
-
-The *paper* scheme, with one worker paused while the other two have finished:
-
-![The paper colour scheme with a paused worker](Screenshots/06-paper-colours-paused-worker.png)
-
-`/fleet messages compact` folds the agents' notices in the transcript; the designer is at work:
-
-![Compact messages](Screenshots/07-compact-messages.png)
-
-The designer's result for a "2-page ISO 42001 briefing" request — a PDF built on the laptop, nothing uploaded:
-
-![The designer's PDF](Screenshots/08-designer-pdf.png)
+![The designer's PDF](Screenshots/05-designer-pdf.png)
 
 ## Features
 
