@@ -656,3 +656,42 @@ test('the pane buttons switch worktrees and the project on and off', async ($, o
     await ui.unmount()
   }
 })
+
+test('budget "stop": at the limit the request stops and no further agent starts', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  let usd = 1
+  on(
+    'session.usage',
+    () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd } } }) as never,
+  )
+  on('session.repo', () => ({ value: null }) as never)
+  on('session.root', () => ({ value: '/repo' }) as never)
+  on('env.get', () => ({ value: '/home/u' }) as never)
+  on('fs.write', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('prompt.submit', (_$, e) => e as never)
+  const stopped: string[] = []
+  on('tool.call', { tool: 'TaskStop' }, (_$, e) => {
+    stopped.push(String((e as { task_id?: string }).task_id))
+    return { result: 'stopped' }
+  })
+  let n = 0
+  on('agent.spawn', (_$, e) => ({ model: e.model ?? 'parent', agentId: `b${++n}` }))
+  await $.command.run({ command: 'fleet', args: '2 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  await $.command.run({ command: 'fleet', args: 'budget 0.5' } as never)
+  await $.command.run({ command: 'fleet', args: 'budget stop' } as never)
+  await $.prompt.submit(composer('Do the work'))
+
+  const first = await $.agent.spawn({ prompt: 'a', description: 'a' } as never)
+  expect(first.deny).toBeUndefined()
+  usd = 1.6 // the request has now cost $0.60
+  const second = await $.agent.spawn({ prompt: 'b', description: 'b' } as never)
+  expect(second.deny).toContain('budget of $0.50')
+  expect(stopped).toEqual([first.agentId])
+
+  await $.prompt.submit(composer('Next request'))
+  const fresh = await $.agent.spawn({ prompt: 'c', description: 'c' } as never)
+  expect(fresh.deny).toBeUndefined()
+})

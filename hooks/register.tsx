@@ -805,6 +805,20 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     const fleet = await read($, plan)
     const active = await isFleetActive($)
+    // Once the latest request has spent its budget under "stop", nothing new starts until the
+    // person sends another message: not a worker, a planner, a reviewer or a nested agent.
+    if (fleet.budgetUsd && fleet.budgetAction === 'stop') {
+      await tickBudget($)
+      const latest = (await read($, requests)).at(-1)
+      if (latest && (latest.budgetLevel ?? 0) >= 2) {
+        return {
+          deny:
+            `The agent fleet budget of ${usdText(fleet.budgetUsd)} for this request is spent ` +
+            `(${usdText(latest.cost ?? 0)} used), so no further agents start. Stop here and tell ` +
+            'the user; they can raise it with /fleet budget, or send a new message.',
+        }
+      }
+    }
     const isMain = e.parentAgentId === undefined && !e.workflow && !e.isTeammate
     const rerunOf = rerunQueue.get(e.description)
     if (rerunOf) rerunQueue.delete(e.description)
