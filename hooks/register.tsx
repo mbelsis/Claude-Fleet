@@ -446,6 +446,32 @@ async function worktreeReport($: EngineInterface): Promise<string> {
     .join('\n')
 }
 
+/**
+ * Switches the fleet on or off for the current project. Shared by `/fleet use` and the pane's
+ * button: a plugin cannot answer a command it runs itself, so the button calls this directly.
+ */
+async function setProjectUse($: EngineInterface, isOn: boolean): Promise<string> {
+  const root = await projectRoot($)
+  const offList = ((await $.store.get('projects-off')) as string[] | undefined) ?? []
+  const nextList = isOn ? offList.filter(one => one !== root) : [...new Set([...offList, root])]
+  await $.store.set('projects-off', nextList)
+  await update($, isProjectOff, () => !isOn)
+  return isOn
+    ? `Agent fleet is on again for ${root}.`
+    : `Agent fleet is off for ${root}. Other projects keep their setting; /fleet use on turns it back on here.`
+}
+
+/** Turns worktrees on or off; shared by `/fleet worktrees on|off` and the pane's button. */
+async function setWorktreesMode($: EngineInterface, isOn: boolean): Promise<string> {
+  if (isOn && (await $.session.repo()) === null) {
+    return 'This project is not a git repository, so worktrees cannot be used here.'
+  }
+  await savePlan($, current => ({ ...current, isWorktrees: isOn }))
+  return isOn
+    ? 'Each worker now edits its own git worktree and branch. Merge them with /fleet merge.'
+    : 'Workers edit the project directly. Existing fleet worktrees are kept; see /fleet worktrees.'
+}
+
 /** Reads what an agent is doing: its latest text and its latest tool call. */
 async function peekRun($: EngineInterface, run: FleetRun): Promise<FleetPeek> {
   const at = await $.clock.now()
@@ -616,18 +642,7 @@ export const register: Register = on => {
     }
     if (head === 'use') {
       if (word !== 'on' && word !== 'off') return { text: 'Use /fleet use on | off' }
-      const root = await projectRoot($)
-      const offList = ((await $.store.get('projects-off')) as string[] | undefined) ?? []
-      const nextList =
-        word === 'off' ? [...new Set([...offList, root])] : offList.filter(one => one !== root)
-      await $.store.set('projects-off', nextList)
-      await update($, isProjectOff, () => word === 'off')
-      return {
-        text:
-          word === 'off'
-            ? `Agent fleet is off for ${root}. Other projects keep their setting; /fleet use on turns it back on here.`
-            : `Agent fleet is on again for ${root}.`,
-      }
+      return { text: await setProjectUse($, word === 'on') }
     }
     if (arg === 'clear') {
       await update($, runs, list => list.filter(run => run.status === 'running'))
@@ -698,16 +713,7 @@ export const register: Register = on => {
     }
     if (head === 'worktrees') {
       if (word === 'on' || word === 'off') {
-        if (word === 'on' && (await $.session.repo()) === null) {
-          return { text: 'This project is not a git repository, so worktrees cannot be used here.' }
-        }
-        await savePlan($, current => ({ ...current, isWorktrees: word === 'on' }))
-        return {
-          text:
-            word === 'on'
-              ? 'Each worker now edits its own git worktree and branch. Merge them with /fleet merge.'
-              : 'Workers edit the project directly. Existing fleet worktrees are kept; see /fleet worktrees.',
-        }
+        return { text: await setWorktreesMode($, word === 'on') }
       }
       return { text: await worktreeReport($) }
     }
@@ -1218,7 +1224,7 @@ export const register: Register = on => {
         return { ...current, theme: THEME_KEYS[(index + 1) % THEME_KEYS.length] ?? 'default' }
       })
     const toggleProject = async () => {
-      await $.command.run({ command: 'fleet', args: projectOff ? 'use on' : 'use off' })
+      $.ui.toast(await setProjectUse($, projectOff))
     }
     const openPeek = async (run: FleetRun) => {
       if (peeked?.runId === run.id) {
@@ -1491,12 +1497,7 @@ export const register: Register = on => {
             hotkey="w"
             variant="primary"
             label={isWorktreesOn(fleet) ? 'on' : 'off'}
-            onPress={() =>
-              $.command.run({
-                command: 'fleet',
-                args: isWorktreesOn(fleet) ? 'worktrees off' : 'worktrees on',
-              })
-            }
+            onPress={async () => $.ui.toast(await setWorktreesMode($, !isWorktreesOn(fleet)))}
           />
           <Text color={ink}>
             {' '}

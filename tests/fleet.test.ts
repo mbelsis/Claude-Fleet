@@ -472,11 +472,7 @@ test('a worktree agent may not write outside its worktree or touch branches', as
 })
 
 /** Answers the session, environment and file calls a request needs in a test. */
-function host(
-  on: On,
-  gitCalls: string[][],
-  conflictOn?: string,
-) {
+function host(on: On, gitCalls: string[][], conflictOn?: string) {
   on('session.repo', () => ({ value: { root: '/repo', remote: null, internal: false } }) as never)
   on('session.root', () => ({ value: '/repo' }) as never)
   on('env.get', () => ({ value: '/home/u' }) as never)
@@ -632,4 +628,31 @@ test('worktrees: each worker gets one, merges stop at the first conflict and not
   ).toBe(false)
   const list = await $.command.run({ command: 'fleet', args: 'worktrees' } as never)
   expect(list.text).toContain('CONFLICT')
+})
+
+test('the pane buttons switch worktrees and the project on and off', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  host(on, [])
+  on('ui.toast', () => ({ value: undefined }) as never)
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({
+      plugin: 'agent-fleet',
+      surface,
+      component: 'Pane',
+      requestId: 'agent-fleet',
+      props: { bodyColumns: 100 },
+      viewport: { columns: 140, rows: 50 },
+    } as never)
+    expect((await ui.find({ key: 'worktrees' }))?.text).toContain('off')
+    await ui.press({ key: 'worktrees' })
+    expect((await ui.find({ key: 'worktrees' }))?.text).toContain('on')
+    await ui.press({ key: 'worktrees' })
+    expect((await ui.find({ key: 'worktrees' }))?.text).toContain('off')
+    expect((await ui.find({ key: 'project' }))?.text).toContain('on')
+    await ui.press({ key: 'project' })
+    expect((await ui.find({ key: 'project' }))?.text).toContain('off')
+    await ui.press({ key: 'project' })
+    await ui.unmount()
+  }
 })
