@@ -576,10 +576,12 @@ export const HELP_LINES: readonly string[] = [
   '/fleet worktrees           list fleet worktrees and what is still unmerged',
   '/fleet merge               merge finished worktrees into the base branch, stop on conflict',
   "/fleet detach N            remove job N's worktree but keep its branch",
+  '/fleet notify on|off|sound|banner   announce finished requests (30 s or longer)',
+  '/fleet history [all]       past requests here (or everywhere) and their run folders',
   '/fleet theme NAME          pane colours: ' + Object.keys(THEMES).join(', '),
   '/fleet stop                stop every running fleet agent',
   '/fleet clear               remove finished agents and requests',
   '/fleet help                show this list',
   'Pane keys: t plan · p/o planner · r/e reviewer · f/m fewer/more · a count · 1–9 agent model',
-  '           b colours · s stop all · c clear · h help',
+  '           b colours · s stop all · c clear · y history · h help',
 ]

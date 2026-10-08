@@ -22,6 +22,8 @@ export type FleetPlan = {
   budgetUsd?: number | null
   /** What happens when a request reaches its budget. */
   budgetAction?: 'warn' | 'stop'
+  /** How a finished request is announced: sound and banner (default), one of them, or nothing. */
+  notify?: 'all' | 'sound' | 'banner' | 'off'
 }
 
 export type FleetStatus = 'running' | 'done' | 'failed' | 'stopped'
@@ -119,6 +121,20 @@ export type FleetWorktree = {
   note: string
 }
 
+/** One finished request, kept across sessions so a run can be found again. */
+export type FleetHistoryEntry = {
+  id: string
+  title: string
+  project: string
+  startedAt: number
+  endedAt: number
+  outcome: 'done' | 'stopped'
+  agents: number
+  tokens: number
+  cost: number | null
+  runDir: string | null
+}
+
 /** What the pane shows for one agent opened with "peek". */
 export type FleetPeek = {
   runId: string
@@ -140,6 +156,8 @@ declare module 'claude-code' {
       isProjectOff: boolean
       worktrees: FleetWorktree[]
       peek: FleetPeek | null
+      history: FleetHistoryEntry[]
+      isHistoryOpen: boolean
     }
   }
 }

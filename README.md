@@ -12,6 +12,8 @@ A Claude Code plugin that splits each task across a fleet of subagents you confi
 - **Budget:** a spending limit per request in US dollars (`/fleet budget 5`), read every second from the same running total `/cost` shows, counted from the moment you send the request. It warns at 80% and at the limit; with `/fleet budget stop` it stops the request's agents, refuses any further agent until your next message, and tells Claude why. Each event also leaves a line in the transcript.
   It is a tripwire, not a hard cap: cost is only counted when a model response finishes, and responses already running when the stop happens still complete, so a request with several agents can end noticeably above the limit (in testing, $1.32 against $0.50 with three agents searching the web). Set the limit below what you can tolerate. On a subscription such as Claude Max, the figure is what the usage would cost at API prices, not what you are billed.
 - **Per project:** `/fleet use off` switches the fleet off in one project only.
+- **Finish notification:** a request that ran 30 seconds or longer ends with a short chime (rising when finished, falling when stopped) and, on macOS, a system banner, so you notice it with the terminal in the background. Every finish also leaves a line in the transcript. `/fleet notify on | off | sound | banner`.
+- **History:** finished requests are kept across sessions with their time, agents, cost and run folder. `/fleet history` lists this project's, `/fleet history all` every project's; the pane's *history* button (`y`) shows them with an *open* button for each run folder.
 - **Worktrees** (optional, off by default): see below.
 - **Colours:** the pane has selectable colour schemes; navy is the default.
 
@@ -117,6 +119,8 @@ Uninstalling leaves your run folders (`~/.claude/fleet-runs/`) and any fleet wor
 /fleet worktrees           list fleet worktrees and what is still unmerged
 /fleet merge               merge finished worktrees into the base branch, stop on conflict
 /fleet detach N            remove job N's worktree but keep its branch
+/fleet notify on|off|sound|banner   announce finished requests (30 s or longer)
+/fleet history [all]       past requests here (or everywhere) and their run folders
 /fleet theme NAME          pane colours
 /fleet stop · clear · help
 ```
@@ -130,7 +134,7 @@ claude plugin validate .   # what the module hooks and calls, and anything the e
 claude plugin test .       # runs tests/*.test.ts against the engine
 ```
 
-`hooks/register.tsx` holds everything that talks to Claude Code; `hooks/lib.ts` the pure logic (texts, parsing, waves, guards); `types/index.d.ts` declares the state it keeps.
+`fx/` holds the two notification chimes. `hooks/register.tsx` holds everything that talks to Claude Code; `hooks/lib.ts` the pure logic (texts, parsing, waves, guards); `types/index.d.ts` declares the state it keeps.
 
 ## Contents
 

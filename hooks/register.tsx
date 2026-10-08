@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type {
+  FleetHistoryEntry,
   FleetLead,
   FleetPeek,
   FleetPlan,
@@ -85,6 +86,12 @@ const isHelpOpen = atom({ plugin: 'agent-fleet', key: 'isHelpOpen' } as const, f
 const isProjectOff = atom({ plugin: 'agent-fleet', key: 'isProjectOff' } as const, false)
 const worktrees = atom({ plugin: 'agent-fleet', key: 'worktrees' } as const, [])
 const peek = atom({ plugin: 'agent-fleet', key: 'peek' } as const, null)
+const history = atom({ plugin: 'agent-fleet', key: 'history' } as const, [])
+const isHistoryOpen = atom({ plugin: 'agent-fleet', key: 'isHistoryOpen' } as const, false)
+/** Finished requests kept across sessions. */
+const KEPT_HISTORY = 200
+/** Requests shorter than this finish without a sound or banner. */
+const NOTIFY_AFTER_MS = 30_000
 
 const GLYPH = { running: '●', done: '✓', failed: '✗', stopped: '■' } as const
 // Theme keys, so status colours follow the person's light or dark theme.
@@ -208,6 +215,83 @@ async function stopRun($: EngineInterface, run: FleetRun): Promise<void> {
   await refreshStatus($)
 }
 
+/** Announces a finished request: a transcript line always, then a sound and a banner. */
+async function announce($: EngineInterface, entry: FleetHistoryEntry): Promise<void> {
+  const mode = (await read($, plan)).notify ?? 'all'
+  const line =
+    `Agent fleet: "${entry.title}" ${entry.outcome === 'done' ? 'finished' : 'stopped'} · ` +
+    `${elapsedText(entry.startedAt, entry.endedAt)} · ${entry.agents} agents` +
+    (entry.cost ? ` · ${usdText(entry.cost)}` : '') +
+    (entry.runDir ? ` · ${entry.runDir}` : '')
+  $.ui.log(line)
+  if (mode === 'off' || entry.endedAt - entry.startedAt < NOTIFY_AFTER_MS) return
+  if (mode === 'all' || mode === 'sound') {
+    const asset = entry.outcome === 'done' ? 'fx/done.wav' : 'fx/alert.wav'
+    await $.audio.play({ asset }).catch(() => undefined)
+  }
+  if (mode === 'all' || mode === 'banner') {
+    // A system banner reaches the person when the terminal is in the background (macOS only;
+    // elsewhere the command is missing and nothing happens).
+    const quote = (text: string) => text.replace(/[\\"]/g, '').slice(0, 180)
+    const title = entry.outcome === 'done' ? 'Agent fleet: finished' : 'Agent fleet: stopped'
+    const script = `display notification "${quote(line.replace(/^Agent fleet: /, ''))}" with title "${title}"`
+    await $.process.run(['osascript', '-e', script], { timeoutMs: 5_000 }).catch(() => undefined)
+  }
+}
+
+/** Records a request that has ended in the history, and announces it once. */
+async function finishRequest($: EngineInterface, requestId: string): Promise<void> {
+  const request = (await read($, requests)).find(one => one.id === requestId)
+  if (request === undefined || request.endedAt === null) return
+  if ((await read($, history)).some(one => one.id === request.id)) return
+  const mine = (await read($, runs)).filter(run => run.requestId === request.id)
+  const entry: FleetHistoryEntry = {
+    id: request.id,
+    title: request.title,
+    project: await projectRoot($),
+    startedAt: request.startedAt,
+    endedAt: request.endedAt,
+    outcome: request.outcome === 'stopped' ? 'stopped' : 'done',
+    agents: mine.length,
+    tokens: mine.reduce((sum, run) => sum + (run.tokens ?? 0), 0),
+    cost: request.cost ?? null,
+    runDir: request.runDir ?? null,
+  }
+  await update($, history, list => [...list, entry].slice(-KEPT_HISTORY))
+  await $.store.set('history', await read($, history))
+  await announce($, entry)
+}
+
+/** Opens a run folder in the system's file browser. */
+async function openFolder($: EngineInterface, path: string): Promise<void> {
+  const opened = await $.process.run(['open', path]).catch(() => null)
+  if (opened === null || opened.exitCode !== 0) {
+    const other = await $.process.run(['xdg-open', path]).catch(() => null)
+    if (other === null || other.exitCode !== 0) $.ui.toast(`Agent fleet: run folder ${path}`)
+  }
+}
+
+function historyText(list: FleetHistoryEntry[], project: string | null): string {
+  const shown = list
+    .filter(one => project === null || one.project === project)
+    .slice(-15)
+    .reverse()
+  if (shown.length === 0)
+    return project
+      ? 'No finished fleet requests in this project yet.'
+      : 'No finished fleet requests yet.'
+  return shown
+    .map(
+      one =>
+        `${one.outcome === 'done' ? '✓' : '■'} ${new Date(one.endedAt).toISOString().slice(0, 16).replace('T', ' ')} ` +
+        `${one.title} · ${elapsedText(one.startedAt, one.endedAt)} · ${one.agents} agents` +
+        (one.cost ? ` · ${usdText(one.cost)}` : '') +
+        (project === null ? `\n    ${one.project}` : '') +
+        (one.runDir ? `\n    ${one.runDir}` : ''),
+    )
+    .join('\n')
+}
+
 async function stopRequest($: EngineInterface, request: FleetRequest): Promise<void> {
   const list = await read($, runs)
   const running = list.filter(run => run.requestId === request.id && run.status === 'running')
@@ -216,6 +300,7 @@ async function stopRequest($: EngineInterface, request: FleetRequest): Promise<v
   await setRequest($, request.id, one =>
     one.endedAt === null ? { ...one, endedAt: at, outcome: 'stopped' } : one,
   )
+  await finishRequest($, request.id)
 }
 
 /** Creates the worktree and branch one worker edits in, cut from the request's base commit. */
@@ -597,6 +682,8 @@ export const register: Register = on => {
     const root = await projectRoot($)
     const offList = ((await $.store.get('projects-off')) as string[] | undefined) ?? []
     await update($, isProjectOff, () => offList.includes(root))
+    const past = ((await $.store.get('history')) as FleetHistoryEntry[] | undefined) ?? []
+    await update($, history, () => past)
     const ledger = ((await $.store.get('worktrees')) as FleetWorktree[] | undefined) ?? []
     await update($, worktrees, () => ledger)
     const pending = ledger.filter(one => one.repoRoot === root && UNMERGED.includes(one.status))
@@ -740,6 +827,23 @@ export const register: Register = on => {
       return { text: await worktreeReport($) }
     }
     if (arg === 'merge') return { text: await mergeWorktrees($) }
+    if (head === 'notify') {
+      const modes = { on: 'all', off: 'off', sound: 'sound', banner: 'banner', all: 'all' } as const
+      const mode = modes[word as keyof typeof modes]
+      if (mode === undefined) return { text: 'Use /fleet notify on | off | sound | banner' }
+      await savePlan($, current => ({ ...current, notify: mode }))
+      return {
+        text:
+          mode === 'off'
+            ? 'Finished requests are only noted in the transcript.'
+            : `Requests of 30 seconds or longer announce themselves with ${mode === 'all' ? 'a sound and a banner' : `a ${mode}`}.`,
+      }
+    }
+    if (head === 'history') {
+      return {
+        text: historyText(await read($, history), word === 'all' ? null : await projectRoot($)),
+      }
+    }
     if (head === 'detach') {
       const job = Number(word)
       if (!Number.isInteger(job) || job < 1) return { text: 'Use /fleet detach N (the job number)' }
@@ -1110,6 +1214,7 @@ export const register: Register = on => {
           endedAt: at,
           outcome: e.reason === 'aborted' ? 'stopped' : 'done',
         }))
+        await finishRequest($, open.id)
         const workers = mine.filter(run => run.role === 'worker' && !run.rerunOf)
         const fleet = await read($, plan)
         const jobs = open.jobs ?? []
@@ -1233,9 +1338,16 @@ export const register: Register = on => {
     const rows = Math.max(10, e.props.scroll?.bodyRows ?? e.viewport?.rows ?? 30)
     const theme = themeOf(fleet)
     const showHelp = await read($, isHelpOpen)
+    const showHistory = await read($, isHistoryOpen)
     const projectOff = await read($, isProjectOff)
     const peeked = await read($, peek)
     const root = await projectRoot($)
+    const pastHere = showHistory
+      ? (await read($, history))
+          .filter(one => one.project === root)
+          .slice(-8)
+          .reverse()
+      : []
     const ledger = (await read($, worktrees)).filter(one => one.repoRoot === root)
     const unmerged = ledger.filter(one => UNMERGED.includes(one.status))
     const ink = theme.text
@@ -1275,7 +1387,10 @@ export const register: Register = on => {
       await update($, peek, () => fresh)
     }
 
-    const descWidth = Math.max(10, width - 66)
+    // Rows are laid out to the pane's width, so nothing wraps: what does not fit on the first
+    // line moves to the lines under it, and every line is cut at the edge rather than wrapped.
+    const inner = Math.max(30, width - 2)
+    const descWidth = Math.max(8, inner - 46)
     const runRow = (run: FleetRun) => {
       const percent = percentOf(run)
       const replaced = isReplaced(run, list)
@@ -1290,13 +1405,13 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           <Box>
-            <Text color={STATUS_COLOR[run.status]} dimColor={replaced}>
+            <Text color={STATUS_COLOR[run.status]} dimColor={replaced} wrap="truncate-end">
               {'  '}
-              {GLYPH[run.status]} {fit(roleLabel(run), 9)} {fit(run.description, descWidth)}{' '}
-              {fit(shortModel(run.model), 11)} {fit(percent === null ? '—' : `${percent}%`, 5)}{' '}
-              {fit(elapsedText(run.startedAt, run.endedAt ?? at), 6)} {fit(`${run.tools} tools`, 9)}{' '}
-              {fit(detail, 18)}
+              {GLYPH[run.status]} {fit(roleLabel(run), 8)} {fit(run.description, descWidth)}{' '}
+              {fit(shortModel(run.model), 10)} {fit(percent === null ? '—' : `${percent}%`, 4)}{' '}
+              {fit(elapsedText(run.startedAt, run.endedAt ?? at), 6)}
             </Text>
+            <Text> </Text>
             <Button
               key={`peek-${run.id}`}
               dimColor
@@ -1317,6 +1432,10 @@ export const register: Register = on => {
               </>
             )}
           </Box>
+          <Text color={STATUS_COLOR[run.status]} dimColor wrap="truncate-end">
+            {'      '}
+            {detail} · {run.tools} tools
+          </Text>
           {run.task ? (
             <Text color={ink} wrap="truncate-end">
               {'      ↳ '}
@@ -1365,8 +1484,9 @@ export const register: Register = on => {
           earlier.length -
           unmerged.length -
           (showHelp ? HELP_LINES.length + 2 : 0) -
-          (peeked ? 10 : 0)) /
-          2,
+          (peeked ? 10 : 0) -
+          (showHistory ? 10 : 0)) /
+          3,
       ),
     )
     const latestRuns = latest ? list.filter(run => run.requestId === latest.id).slice(-room) : []
@@ -1377,18 +1497,23 @@ export const register: Register = on => {
       const tokens = mine.reduce((sum, run) => sum + (run.tokens ?? 0), 0)
       const percent = requestPercent(request, list, fleet)
       const color = phase === 'done' ? 'success' : phase === 'stopped' ? 'warning' : 'claude'
+      const isRunning = isLatest && phase !== 'done' && phase !== 'stopped'
+      const barWidth = Math.max(8, Math.min(20, inner - 60))
+      const facts = [
+        PHASE_LABEL[phase],
+        `${mine.length} agents`,
+        elapsedText(request.startedAt, request.endedAt ?? at),
+        ...(tokens > 0 ? [tokensText(tokens)] : []),
+        ...(request.cost ? [usdText(request.cost)] : []),
+      ].join(' · ')
       return (
         <Box flexDirection="column">
           <Box>
-            <Text color={color} bold={isLatest}>
+            <Text color={color} bold={isLatest} wrap="truncate-end">
               {phase === 'done' ? '✓' : phase === 'stopped' ? '■' : '▶'}{' '}
-              {fit(request.title, Math.max(12, width - 70))} {bar(percent, 12)}{' '}
-              {String(percent).padStart(3)}% {fit(PHASE_LABEL[phase], 17)} {mine.length} agents ·{' '}
-              {elapsedText(request.startedAt, request.endedAt ?? at)}
-              {tokens > 0 ? ` · ${tokensText(tokens)}` : ''}
-              {request.cost ? ` · ${usdText(request.cost)}` : ''}
+              {fit(request.title, Math.max(12, inner - (isRunning ? 14 : 2)))}
             </Text>
-            {isLatest && phase !== 'done' && phase !== 'stopped' && (
+            {isRunning && (
               <Button
                 key="stop-all"
                 hotkey="s"
@@ -1397,6 +1522,10 @@ export const register: Register = on => {
               />
             )}
           </Box>
+          <Text color={color} wrap="truncate-end">
+            {'  '}
+            {bar(percent, barWidth)} {String(percent).padStart(3)}% {facts}
+          </Text>
           {isLatest && request.runDir ? (
             <Text color={ink} wrap="truncate-end">
               {'  '}Run folder: {request.runDir}
@@ -1573,6 +1702,14 @@ export const register: Register = on => {
               await refreshStatus($)
             }}
           />
+          <Text color={ink}> </Text>
+          <Button
+            key="history"
+            hotkey="y"
+            variant="primary"
+            label={showHistory ? 'hide history' : 'history'}
+            onPress={() => update($, isHistoryOpen, open => !open)}
+          />
           {projectOff && <Text color="warning"> the fleet is off for this project</Text>}
         </Box>
         {items.length === 0 && loose.length === 0 && <Text color={ink}>No subagents yet.</Text>}
@@ -1582,6 +1719,38 @@ export const register: Register = on => {
         {earlier.map(request => requestLine(request, false))}
         {loose.length > 0 && <Text color={ink}>Other agents</Text>}
         {loose.slice(-5).map(runRow)}
+        {showHistory && <Text color={ink}> </Text>}
+        {showHistory && (
+          <Text color={ink} bold>
+            History · this project
+          </Text>
+        )}
+        {showHistory && pastHere.length === 0 && (
+          <Text color={ink}>No finished requests here yet.</Text>
+        )}
+        {pastHere.map(one => (
+          <Box>
+            <Text color={one.outcome === 'done' ? 'success' : 'warning'} wrap="truncate-end">
+              {one.outcome === 'done' ? '✓' : '■'}{' '}
+              {new Date(one.endedAt).toISOString().slice(5, 16).replace('T', ' ')}{' '}
+              {fit(one.title, Math.max(12, inner - 44))}{' '}
+              {fit(elapsedText(one.startedAt, one.endedAt), 6)} {fit(`${one.agents} ag`, 5)}{' '}
+              {one.cost ? usdText(one.cost) : ''}
+            </Text>
+            {one.runDir ? (
+              <>
+                <Text> </Text>
+                <Button
+                  key={`open-${one.id}`}
+                  dimColor
+                  plain
+                  label="open"
+                  onPress={() => openFolder($, one.runDir!)}
+                />
+              </>
+            ) : null}
+          </Box>
+        ))}
         {unmerged.length > 0 && <Text color={ink}> </Text>}
         {unmerged.length > 0 && (
           <Box>

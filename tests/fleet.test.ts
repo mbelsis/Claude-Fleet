@@ -739,3 +739,92 @@ test('reaching the budget leaves a transcript line and tells Claude why', async 
   ).toBe(true)
   expect(notes.some(note => note.includes('Do not relaunch'))).toBe(true)
 })
+
+test('a finished request goes into the history and announces itself', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  const played: string[] = []
+  const banners: string[] = []
+  const logs: string[] = []
+  on(
+    'session.usage',
+    () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd: 1 } } }) as never,
+  )
+  on('session.repo', () => ({ value: { root: '/repo', remote: null, internal: false } }) as never)
+  on('session.root', () => ({ value: '/repo' }) as never)
+  on('env.get', () => ({ value: '/home/u' }) as never)
+  on('fs.write', () => ({ value: undefined }) as never)
+  on(
+    'ui.log',
+    (_$, e) => (logs.push(String((e as { text?: string }).text)), { value: undefined }) as never,
+  )
+  on(
+    'audio.play',
+    (_$, e) =>
+      (played.push(String((e as unknown as { clip: { asset?: string } }).clip.asset)), { value: undefined }) as never,
+  )
+  on('process.run', (_$, e) => {
+    const argv = (e as { argv: string[] }).argv
+    if (argv[0] === 'osascript') banners.push(argv[2] ?? '')
+    return {
+      value: {
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    } as never
+  })
+  on('prompt.submit', (_$, e) => e as never)
+  on('turn.complete', (_$, e) => ({ text: (e as { answer: string }).answer }))
+  on('agent.spawn', (_$, e) => ({ model: e.model ?? 'parent', agentId: 'h1' }))
+  await $.command.run({ command: 'fleet', args: '1 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  await $.prompt.submit(composer('Write the report'))
+  const agent = await $.agent.spawn({ prompt: 'a', description: 'a' } as never)
+  await clock.advance(45_000)
+  await $.turn.complete({
+    answer: 'ok',
+    agentId: agent.agentId,
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 't',
+  } as never)
+  await $.turn.complete({
+    answer: 'done',
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 'm',
+  } as never)
+
+  expect(played).toEqual(['fx/done.wav'])
+  expect(banners[0]).toContain('Write the report')
+  expect(logs.some(line => line.includes('"Write the report" finished'))).toBe(true)
+  const past = await $.command.run({ command: 'fleet', args: 'history' } as never)
+  expect(past.text).toContain('Write the report')
+  expect(past.text).toContain('/home/u/.claude/fleet-runs/repo/')
+
+  await $.command.run({ command: 'fleet', args: 'notify off' } as never)
+  await $.prompt.submit(composer('Second report'))
+  const again = await $.agent.spawn({ prompt: 'b', description: 'b' } as never)
+  await clock.advance(45_000)
+  await $.turn.complete({
+    answer: 'ok',
+    agentId: again.agentId,
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 't2',
+  } as never)
+  await $.turn.complete({
+    answer: 'done',
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 'm2',
+  } as never)
+  expect(played).toEqual(['fx/done.wav'])
+})
