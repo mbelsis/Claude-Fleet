@@ -19,11 +19,11 @@ A Claude Code plugin that splits each task across a fleet of subagents you confi
 
 The lead planner at work: `/fleet help` on the left, and on the right the pane with the plan (planner on, three workers on sonnet, sonnet and opus), the request in its Planning stage and its run folder. The status band above the prompt shows the overall progress.
 
-![The fleet planning a request](Screenshots/Screenshot%202026-10-08%20at%204.37.37%20PM.png)
+![The fleet planning a request](Screenshots/fleet-planning.png)
 
 The plan has been shared out: the planner has finished (✓, 100%), and three workers run in parallel, each with its model, progress, elapsed time, tool count and current step, and under each the job it was given. Each row has *peek* and *stop*.
 
-![Three workers running the planner's jobs](Screenshots/Screenshot%202026-10-08%20at%204.39.04%20PM.png)
+![Three workers running the planner's jobs](Screenshots/fleet-workers-running.png)
 
 ## Worktrees: how parallel code changes come back together
 
