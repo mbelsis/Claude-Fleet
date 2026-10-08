@@ -28,7 +28,7 @@ export type FleetPlan = {
   notify?: 'all' | 'sound' | 'banner' | 'off'
 }
 
-export type FleetStatus = 'running' | 'done' | 'failed' | 'stopped'
+export type FleetStatus = 'running' | 'paused' | 'done' | 'failed' | 'stopped'
 
 export type FleetRole = 'planner' | 'worker' | 'reviewer' | 'designer' | 'other'
 
@@ -73,6 +73,8 @@ export type FleetRun = {
   worktreeId?: string | null
   /** The run this one repeats, for a rerun. */
   rerunOf?: string | null
+  /** The person asked to pause it: it stops at its next tool call. */
+  pauseRequested?: boolean
 }
 
 /** One job of a planner's plan, and the jobs it waits for. */

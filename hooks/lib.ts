@@ -502,7 +502,7 @@ export function taskOf(prompt: string): string {
 }
 
 export type Phase =
-  'planning' | 'working' | 'combining' | 'reviewing' | 'designing' | 'done' | 'stopped'
+  'planning' | 'working' | 'paused' | 'combining' | 'reviewing' | 'designing' | 'done' | 'stopped'
 
 /** Where a request stands, read from its agents. */
 export function phaseOf(request: FleetRequest, list: FleetRun[]): Phase {
@@ -510,6 +510,8 @@ export function phaseOf(request: FleetRequest, list: FleetRun[]): Phase {
   if (request.endedAt !== null) return 'done'
   const mine = list.filter(run => run.requestId === request.id)
   const isRunning = (role: FleetRole) => mine.some(r => r.role === role && r.status === 'running')
+  if (!mine.some(r => r.status === 'running') && mine.some(r => r.status === 'paused'))
+    return 'paused'
   if (isRunning('designer')) return 'designing'
   if (isRunning('reviewer')) return 'reviewing'
   if (isRunning('worker') || isRunning('other')) return 'working'
@@ -526,7 +528,11 @@ export function requestPercent(request: FleetRequest, list: FleetRun[], fleet: F
   if (request.endedAt !== null) return 100
   const mine = list.filter(run => run.requestId === request.id && !isReplaced(run, list))
   const share = (run: FleetRun | undefined): number =>
-    run === undefined ? 0 : run.status !== 'running' ? 1 : (percentOf(run) ?? 0) / 100
+    run === undefined
+      ? 0
+      : run.status === 'running' || run.status === 'paused'
+        ? (percentOf(run) ?? 0) / 100
+        : 1
   const planners = mine.filter(run => run.role === 'planner')
   const workers = mine.filter(run => run.role === 'worker' || run.role === 'other')
   const reviewers = mine.filter(run => run.role === 'reviewer')
@@ -630,6 +636,30 @@ export function worktreeGuard(
   return null
 }
 
+/**
+ * A request's title: the first line of what the person typed, with pasted-content markers
+ * removed, cut to 60 characters.
+ */
+export function titleOf(text: string): string {
+  const line =
+    text
+      .replace(/<\/?pasted_content[^>]*>/gi, '\n')
+      .split('\n')
+      .map(one => one.trim())
+      .find(one => one !== '') ?? ''
+  return line.length > 60 ? `${line.slice(0, 59)}…` : line || 'Request'
+}
+
+/**
+ * Colours that tell the lead agents apart from the workers in the pane. Mid-tone, so they read
+ * on the dark schemes and on the light ones alike.
+ */
+export const ROLE_COLOR: Partial<Record<FleetRole, string>> = {
+  planner: '#a371f7',
+  reviewer: '#2f9fd8',
+  designer: '#e0569b',
+}
+
 /** Every /fleet parameter, as the command's own help. */
 export const HELP_LINES: readonly string[] = [
   '/fleet                     open the pane',
@@ -650,10 +680,11 @@ export const HELP_LINES: readonly string[] = [
   '/fleet notify on|off|sound|banner   announce finished requests (30 s or longer)',
   '/fleet history [all]       past requests here (or everywhere) and their run folders',
   '/fleet theme NAME          pane colours: ' + Object.keys(THEMES).join(', '),
+  '/fleet pause | resume      pause running agents at their next tool call; resume them',
   '/fleet stop                stop every running fleet agent',
   '/fleet clear               remove finished agents and requests',
   '/fleet help                show this list',
   'Pane keys: t plan · p/o planner · r/e reviewer · d/n designer · f/m fewer/more · a count',
   '           1–9 agent model',
-  '           b colours · s stop all · c clear · y history · h help',
+  '           b colours · s stop all · x pause or resume all · c clear · y history · h help',
 ]

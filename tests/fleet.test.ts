@@ -29,6 +29,7 @@ import {
   deliverableOf,
   designerGuard,
   DESIGNER_TYPE,
+  titleOf,
 } from '../hooks/register'
 
 // The kit's `$` takes an event's full input; the plugin's calls take the short form.
@@ -897,4 +898,92 @@ test('the designer runs on its own model, writes to the run folder and may not u
     content: 'x',
   } as never)
   expect((write as { deny?: string }).deny).toBeUndefined()
+})
+
+test('a pasted-content marker never becomes the title', async () => {
+  expect(
+    titleOf('<pasted_content id="1846">\nCreate a 10-slide board deck\n</pasted_content>'),
+  ).toBe('Create a 10-slide board deck')
+  expect(titleOf('Plain request')).toBe('Plain request')
+})
+
+test('pause stops an agent at its next tool call, keeps the request open, and resume wakes it', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  host(on, [])
+  const stops: string[] = []
+  const messages: { to: string; message: string }[] = []
+  const notes: string[] = []
+  let sendFails = false
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.log', () => ({ value: undefined }) as never)
+  on('session.append', (_$, e, next) => {
+    const content = (e as unknown as { message: { content: { text: string }[] } }).message.content
+    notes.push(content.map(block => block.text).join(''))
+    return next(e)
+  })
+  on('tool.call', (_$, e) => {
+    const call = e as unknown as { tool: string; task_id?: string; to?: string; message?: string }
+    if (call.tool === 'TaskStop') stops.push(String(call.task_id))
+    if (call.tool === 'SendMessage') {
+      if (sendFails) return { deny: 'no such agent' } as never
+      messages.push({ to: String(call.to), message: String(call.message) })
+    }
+    return { result: `ran ${call.tool}` } as never
+  })
+  on('prompt.submit', (_$, e) => e as never)
+  on('turn.complete', (_$, e) => ({ text: (e as { answer: string }).answer }))
+  const spawned: string[] = []
+  on(
+    'agent.spawn',
+    (_$, e) => (
+      spawned.push(e.description),
+      { model: e.model ?? 'parent', agentId: `p${spawned.length}` }
+    ),
+  )
+  await $.command.run({ command: 'fleet', args: '1 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  await $.prompt.submit(composer('Long task'))
+  const agent = await $.agent.spawn({ prompt: 'work', description: 'worker' } as never)
+
+  // The pause takes effect at the next tool call, not before.
+  const paused = await $.command.run({ command: 'fleet', args: 'pause' } as never)
+  expect(paused.text).toContain('pause at their next tool call')
+  expect(stops).toEqual([])
+  const refused = await $.tool.call({
+    tool: 'Read',
+    agentId: agent.agentId,
+    file_path: '/x',
+  } as never)
+  expect((refused as { deny?: string }).deny).toContain('Paused by the user')
+  expect(stops).toEqual([agent.agentId])
+  expect(notes.some(note => note.includes('Do not relaunch it'))).toBe(true)
+
+  // The stop ends the agent's turn as aborted; it stays paused and the request stays open.
+  await $.turn.complete({
+    answer: '',
+    agentId: agent.agentId,
+    reason: 'aborted',
+    durationMs: 1,
+    isAborted: true,
+    turnId: 't',
+  } as never)
+  await $.turn.complete({
+    answer: 'waiting',
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 'm',
+  } as never)
+  const resumed = await $.command.run({ command: 'fleet', args: 'resume' } as never)
+  expect(resumed.text).toBe('Resumed 1 agent(s).')
+  expect(messages[0]?.to).toBe(agent.agentId)
+  expect(messages[0]?.message).toContain('Resume your task')
+
+  // When the agent cannot be woken, it is started again with its brief.
+  await $.command.run({ command: 'fleet', args: 'pause' } as never)
+  await $.tool.call({ tool: 'Read', agentId: agent.agentId, file_path: '/y' } as never)
+  sendFails = true
+  await $.command.run({ command: 'fleet', args: 'resume' } as never)
+  expect(spawned.at(-1)).toBe('worker (rerun)')
 })

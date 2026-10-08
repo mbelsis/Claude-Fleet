@@ -55,6 +55,8 @@ import {
   taskOf,
   THEME_KEYS,
   DEFAULT_THEME,
+  ROLE_COLOR,
+  titleOf,
   DESIGNER_PROMPT,
   DESIGNER_TYPE,
   deliverableOf,
@@ -98,10 +100,11 @@ const KEPT_HISTORY = 200
 /** Requests shorter than this finish without a sound or banner. */
 const NOTIFY_AFTER_MS = 30_000
 
-const GLYPH = { running: '●', done: '✓', failed: '✗', stopped: '■' } as const
+const GLYPH = { running: '●', paused: '⏸', done: '✓', failed: '✗', stopped: '■' } as const
 // Theme keys, so status colours follow the person's light or dark theme.
 const STATUS_COLOR = {
   running: 'claude',
+  paused: 'warning',
   done: 'success',
   failed: 'error',
   stopped: 'warning',
@@ -109,6 +112,7 @@ const STATUS_COLOR = {
 const PHASE_LABEL: Record<Phase, string> = {
   planning: 'Planning',
   working: 'Workers running',
+  paused: 'Paused',
   combining: 'Combining results',
   reviewing: 'Reviewing',
   designing: 'Designing',
@@ -203,6 +207,17 @@ async function setWorktree($: EngineInterface, id: string, change: Partial<Fleet
 
 /** Stops one running agent through the TaskStop tool, as the person's own action. */
 async function stopRun($: EngineInterface, run: FleetRun): Promise<void> {
+  if (run.status === 'paused') {
+    // Already stopped at a safe point: it only stops being resumable.
+    const at = await $.clock.now()
+    await update($, runs, list =>
+      list.map(one =>
+        one.id === run.id ? { ...one, status: 'stopped' as const, endedAt: at } : one,
+      ),
+    )
+    await refreshStatus($)
+    return
+  }
   const answer = await $.tool.call({
     tool: 'TaskStop',
     task_id: run.id,
@@ -300,9 +315,75 @@ function historyText(list: FleetHistoryEntry[], project: string | null): string 
     .join('\n')
 }
 
+/** Tells the main conversation what the person did to its agents, so it waits or carries on. */
+async function tellMain($: EngineInterface, text: string): Promise<void> {
+  await $.session
+    .append({
+      message: { type: 'user', content: [{ type: 'text', text: `[Agent fleet] ${text}` }] },
+    })
+    .catch(() => undefined)
+}
+
+/**
+ * Asks a running agent to pause. Nothing is cut off mid-step: the fleet waits for the agent's
+ * next tool call, refuses that call, and stops the agent there (see the tool.call hook).
+ */
+async function pauseRun($: EngineInterface, run: FleetRun): Promise<void> {
+  if (run.status !== 'running') return
+  await update($, runs, list =>
+    list.map(one => (one.id === run.id ? { ...one, pauseRequested: true } : one)),
+  )
+  $.ui.toast(`Agent fleet: "${run.description}" will pause at its next tool call.`)
+}
+
+/** Wakes a paused agent with a message; it carries on with everything it had done. */
+async function resumeRun(
+  $: EngineInterface,
+  run: FleetRun,
+  queue: Map<string, FleetRun>,
+): Promise<void> {
+  if (run.status !== 'paused') return
+  const answer = await $.tool
+    .call({
+      tool: 'SendMessage',
+      to: run.id,
+      summary: 'Resume a paused fleet agent',
+      message:
+        'Resume your task from where you stopped. The user paused you just before a tool call; ' +
+        'that call did not run, so make it again if you still need it.',
+      consent: `The user pressed "Resume" for the fleet agent "${run.description}".`,
+    })
+    .catch((error: unknown) => ({ deny: String(error) }))
+  const failed = answer.deny !== undefined || (answer as { isError?: boolean }).isError === true
+  if (failed) {
+    // The agent could not be woken: start it again with its brief and what it had done.
+    const done = run.progress
+      ? ` It had finished ${run.progress.done} of ${run.progress.total} steps (next: ${run.progress.step}).`
+      : ''
+    const partial = run.outputPath
+      ? ` Any partial result is in ${run.outputPath}; build on it.`
+      : ''
+    await update($, runs, list =>
+      list.map(one => (one.id === run.id ? { ...one, status: 'stopped' as const } : one)),
+    )
+    await rerunRun($, run, `This continues an earlier run the user paused.${done}${partial}`, queue)
+    $.ui.toast(`Agent fleet: "${run.description}" could not be woken, so it was started again.`)
+    return
+  }
+  await update($, runs, list =>
+    list.map(one =>
+      one.id === run.id ? { ...one, status: 'running' as const, endedAt: null } : one,
+    ),
+  )
+  await tellMain($, `The user resumed "${run.description}". Wait for its result as before.`)
+  await refreshStatus($)
+}
+
 async function stopRequest($: EngineInterface, request: FleetRequest): Promise<void> {
   const list = await read($, runs)
-  const running = list.filter(run => run.requestId === request.id && run.status === 'running')
+  const running = list.filter(
+    run => run.requestId === request.id && (run.status === 'running' || run.status === 'paused'),
+  )
   for (const run of running) await stopRun($, run)
   const at = await $.clock.now()
   await setRequest($, request.id, one =>
@@ -851,6 +932,26 @@ export const register: Register = on => {
       return { text: await worktreeReport($) }
     }
     if (arg === 'merge') return { text: await mergeWorktrees($) }
+    if (arg === 'pause' || arg === 'resume') {
+      const list = (await read($, runs)).filter(run =>
+        arg === 'pause' ? run.status === 'running' : run.status === 'paused',
+      )
+      if (list.length === 0) {
+        return {
+          text: arg === 'pause' ? 'No fleet agent is running.' : 'No fleet agent is paused.',
+        }
+      }
+      for (const run of list) {
+        if (arg === 'pause') await pauseRun($, run)
+        else await resumeRun($, run, rerunQueue)
+      }
+      return {
+        text:
+          arg === 'pause'
+            ? `${list.length} agent(s) will pause at their next tool call.`
+            : `Resumed ${list.length} agent(s).`,
+      }
+    }
     if (head === 'notify') {
       const modes = { on: 'all', off: 'off', sound: 'sound', banner: 'banner', all: 'all' } as const
       const mode = modes[word as keyof typeof modes]
@@ -898,8 +999,7 @@ export const register: Register = on => {
 
     slotCursor = 0
     const at = await $.clock.now()
-    const firstLine = e.text.trim().split('\n')[0] ?? ''
-    const title = firstLine.length > 60 ? `${firstLine.slice(0, 59)}…` : firstLine || 'Request'
+    const title = titleOf(e.text)
     const id = `r${at}`
     let runDir: string | null = null
     if (isFileHandoffOn(fleet)) {
@@ -1173,6 +1273,28 @@ export const register: Register = on => {
     if (agentId === undefined || tool === PROGRESS_TOOL) return next(e)
     const list = await read($, runs)
     const run = list.find(one => one.id === agentId)
+    if (run?.pauseRequested && run.status === 'running') {
+      // The safe point: between steps, before this call runs. Stop the agent here.
+      await update($, runs, items =>
+        items.map(one =>
+          one.id === agentId ? { ...one, status: 'paused' as const, pauseRequested: false } : one,
+        ),
+      )
+      await $.tool
+        .call({
+          tool: 'TaskStop',
+          task_id: run.id,
+          consent: `The user paused the fleet agent "${run.description}".`,
+        })
+        .catch(() => undefined)
+      await tellMain(
+        $,
+        `The user paused "${run.description}". Do not relaunch it and do not finish the request ` +
+          'without it: the user will resume it.',
+      )
+      await refreshStatus($)
+      return { deny: 'Paused by the user. Stop here; you will be told when to resume.' }
+    }
     if (run?.role === 'designer') {
       const refused = designerGuard(tool)
       if (refused !== null) return { deny: refused }
@@ -1226,7 +1348,12 @@ export const register: Register = on => {
       await update($, runs, items =>
         items.map(one =>
           one.id === agentId
-            ? { ...one, status: one.status === 'stopped' ? 'stopped' : status, endedAt: at, tokens }
+            ? {
+                ...one,
+                status: one.status === 'stopped' || one.status === 'paused' ? one.status : status,
+                endedAt: one.status === 'paused' ? null : at,
+                tokens: tokens === null ? one.tokens : (one.tokens ?? 0) + tokens,
+              }
             : one,
         ),
       )
@@ -1246,7 +1373,7 @@ export const register: Register = on => {
           }))
         }
       }
-      if (run?.worktreeId) {
+      if (run?.worktreeId && run.status !== 'paused') {
         const wt = (await read($, worktrees)).find(one => one.id === run.worktreeId)
         if (wt && wt.status === 'active') await finishWorktree($, wt)
       }
@@ -1268,7 +1395,7 @@ export const register: Register = on => {
     if (open !== undefined) {
       const list = await read($, runs)
       const mine = list.filter(run => run.requestId === open.id)
-      if (!mine.some(run => run.status === 'running')) {
+      if (!mine.some(run => run.status === 'running' || run.status === 'paused')) {
         await setRequest($, open.id, one => ({
           ...one,
           endedAt: at,
@@ -1457,24 +1584,36 @@ export const register: Register = on => {
     // Rows are laid out to the pane's width, so nothing wraps: what does not fit on the first
     // line moves to the lines under it, and every line is cut at the edge rather than wrapped.
     const inner = Math.max(30, width - 2)
-    const descWidth = Math.max(8, inner - 46)
+    const descWidth = Math.max(8, inner - 54)
     const runRow = (run: FleetRun) => {
       const percent = percentOf(run)
       const replaced = isReplaced(run, list)
       const detail =
-        run.status === 'running'
-          ? run.progress?.step || run.lastTool || 'starting'
-          : replaced
-            ? 'replaced by rerun'
-            : run.tokens === null
-              ? run.status
-              : tokensText(run.tokens)
+        run.status === 'paused'
+          ? 'paused — press resume to continue'
+          : run.status === 'running'
+            ? (run.pauseRequested ? 'pausing at the next tool call · ' : '') +
+              (run.progress?.step || run.lastTool || 'starting')
+            : replaced
+              ? 'replaced by rerun'
+              : run.tokens === null
+                ? run.status
+                : tokensText(run.tokens)
       return (
         <Box flexDirection="column">
           <Box>
-            <Text color={STATUS_COLOR[run.status]} dimColor={replaced} wrap="truncate-end">
+            <Text color={STATUS_COLOR[run.status]} dimColor={replaced}>
               {'  '}
-              {GLYPH[run.status]} {fit(roleLabel(run), 8)} {fit(run.description, descWidth)}{' '}
+              {GLYPH[run.status]}{' '}
+            </Text>
+            <Text
+              color={ROLE_COLOR[run.role ?? 'worker'] ?? STATUS_COLOR[run.status]}
+              dimColor={replaced}
+              bold={run.role !== undefined && run.role in ROLE_COLOR}
+            >
+              {fit(roleLabel(run), 8)} {fit(run.description, descWidth)}{' '}
+            </Text>
+            <Text color={STATUS_COLOR[run.status]} dimColor={replaced} wrap="truncate-end">
               {fit(shortModel(run.model), 10)} {fit(percent === null ? '—' : `${percent}%`, 4)}{' '}
               {fit(elapsedText(run.startedAt, run.endedAt ?? at), 6)}
             </Text>
@@ -1486,7 +1625,23 @@ export const register: Register = on => {
               label={peeked?.runId === run.id ? 'close' : 'peek'}
               onPress={() => openPeek(run)}
             />
-            {run.status === 'running' && (
+            {(run.status === 'running' || run.status === 'paused') && (
+              <>
+                <Text> </Text>
+                <Button
+                  key={`pause-${run.id}`}
+                  dimColor
+                  plain
+                  label={
+                    run.status === 'paused' ? 'resume' : run.pauseRequested ? 'pausing' : 'pause'
+                  }
+                  onPress={() =>
+                    run.status === 'paused' ? resumeRun($, run, rerunQueue) : pauseRun($, run)
+                  }
+                />
+              </>
+            )}
+            {(run.status === 'running' || run.status === 'paused') && (
               <>
                 <Text> </Text>
                 <Button
@@ -1565,6 +1720,7 @@ export const register: Register = on => {
       const percent = requestPercent(request, list, fleet)
       const color = phase === 'done' ? 'success' : phase === 'stopped' ? 'warning' : 'claude'
       const isRunning = isLatest && phase !== 'done' && phase !== 'stopped'
+      const isPaused = phase === 'paused'
       const barWidth = Math.max(8, Math.min(20, inner - 60))
       const facts = [
         PHASE_LABEL[phase],
@@ -1578,8 +1734,23 @@ export const register: Register = on => {
           <Box>
             <Text color={color} bold={isLatest} wrap="truncate-end">
               {phase === 'done' ? '✓' : phase === 'stopped' ? '■' : '▶'}{' '}
-              {fit(request.title, Math.max(12, inner - (isRunning ? 14 : 2)))}
+              {fit(request.title, Math.max(12, inner - (isRunning ? 28 : 2)))}
             </Text>
+            {isRunning && (
+              <Button
+                key="pause-all"
+                hotkey="x"
+                label={isPaused ? 'Resume all' : 'Pause all'}
+                onPress={async () => {
+                  const mine = (await read($, runs)).filter(run => run.requestId === request.id)
+                  for (const run of mine) {
+                    if (isPaused) await resumeRun($, run, rerunQueue)
+                    else await pauseRun($, run)
+                  }
+                }}
+              />
+            )}
+            {isRunning && <Text> </Text>}
             {isRunning && (
               <Button
                 key="stop-all"
@@ -1647,7 +1818,9 @@ export const register: Register = on => {
           />
         </Box>
         <Box>
-          <Text color={ink}>Planner: </Text>
+          <Text color={ROLE_COLOR.planner} bold>
+            Planner:
+          </Text>
           <Button
             key="planner"
             hotkey="p"
@@ -1666,7 +1839,9 @@ export const register: Register = on => {
           <Text color={ink}> thinks first, plans jobs and waves</Text>
         </Box>
         <Box>
-          <Text color={ink}>Reviewer: </Text>
+          <Text color={ROLE_COLOR.reviewer} bold>
+            Reviewer:
+          </Text>
           <Button
             key="reviewer"
             hotkey="r"
@@ -1685,7 +1860,9 @@ export const register: Register = on => {
           <Text color={ink}> checks the combined result last</Text>
         </Box>
         <Box>
-          <Text color={ink}>Designer: </Text>
+          <Text color={ROLE_COLOR.designer} bold>
+            Designer:
+          </Text>
           <Button
             key="designer"
             hotkey="d"

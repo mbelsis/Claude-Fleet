@@ -9,6 +9,8 @@ A Claude Code plugin that splits each task across a fleet of subagents you confi
 - **Automatic sizing** (optional): the planner chooses between 1 and N workers per task.
 - **Run folders** (on by default): each request gets `~/.claude/fleet-runs/<project>/<date>-<title>/` holding the request, the plan, each worker's result (`job-N.md`), the combined result and a summary. Later waves receive the result files of the jobs they depend on.
 - **Progress:** a pane listing each request and its agents (model, completion, time, tool calls, tokens, the job each was given), a status band above the prompt with an overall progress bar and live cost, and Stop controls.
+- **Pause and resume:** *pause* on an agent (or *Pause all* / `x` on a request, or `/fleet pause`) stops it at a safe point, and *resume* (or `/fleet resume`) lets it carry on with everything it had already read and done. See *Pausing agents* below for exactly when the pause happens.
+- **Role colours:** in the pane the planner (violet), reviewer (blue) and designer (pink) stand out from the workers; the labels of their settings rows use the same colours as a key.
 - **Peek and rerun:** open any agent to see its latest output and tool call; rerun a finished agent with the same brief plus a note ("cut it to 6,000 words").
 - **Budget:** a spending limit per request in US dollars (`/fleet budget 5`), read every second from the same running total `/cost` shows, counted from the moment you send the request. It warns at 80% and at the limit; with `/fleet budget stop` it stops the request's agents, refuses any further agent until your next message, and tells Claude why. Each event also leaves a line in the transcript.
   It is a tripwire, not a hard cap: cost is only counted when a model response finishes, and responses already running when the stop happens still complete, so a request with several agents can end noticeably above the limit (in testing, $1.32 against $0.50 with three agents searching the web). Set the limit below what you can tolerate. On a subscription such as Claude Max, the figure is what the usage would cost at API prices, not what you are billed.
@@ -38,6 +40,16 @@ With `/fleet worktrees on`, every worker edits its own git worktree on its own b
 - Nothing is merged automatically. `/fleet merge` (or *Merge finished* in the pane) merges the finished branches into the base branch one at a time, in job order, with `--no-ff`. It refuses to start if your checkout has uncommitted changes, a merge is in progress, a worker is still running, or a different branch is checked out. On the first conflict it runs `git merge --abort`, so your checkout is exactly as before that branch, names the conflicting files, and stops. Resolve with `git merge <branch>` yourself, then run `/fleet merge` again to continue.
 - A worktree is removed, and its branch deleted with the safe `git branch -d`, only after the branch is confirmed merged. Nothing is ever forced.
 - The list of fleet worktrees is kept across sessions. Each new session in the repository reminds you of branches that still hold unmerged work; `/fleet worktrees` lists them, and `/fleet detach N` removes a worktree folder while keeping its branch.
+
+## Pausing agents
+
+**A pause takes effect at the agent's next tool call — not immediately.** Claude Code has no way to freeze an agent in the middle of its thinking, so the fleet waits for the next point where nothing is half-done: when the agent next tries to read a file, search, run a command or write, that call is refused and the agent is stopped there. An agent that is only thinking or writing a long answer keeps going until it reaches that point — usually seconds, sometimes longer. While it waits the pane shows *pausing*.
+
+- Nothing is left half-written: the refused call never ran, and the agent is told so, so it repeats it after resuming.
+- A paused agent costs nothing while paused. The request stays open, its status band says *Paused*, and Claude is told not to relaunch the agent or finish without it.
+- *Resume* wakes the agent with a message; it continues with its full context. If it cannot be woken, the fleet starts it again with its original brief, how far it had got and its partial result file, and says so.
+- A pause lasts for the session. Agents belong to the session that started them, so resume them before you close it; otherwise they end stopped.
+- *Stop* on a paused agent ends it for good. The budget keeps counting after a resume.
 
 ## Install on any laptop
 
@@ -124,6 +136,7 @@ Uninstalling leaves your run folders (`~/.claude/fleet-runs/`) and any fleet wor
 /fleet notify on|off|sound|banner   announce finished requests (30 s or longer)
 /fleet history [all]       past requests here (or everywhere) and their run folders
 /fleet theme NAME          pane colours
+/fleet pause | resume      pause running agents at their next tool call; resume them
 /fleet stop · clear · help
 ```
 
