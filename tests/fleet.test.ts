@@ -26,6 +26,9 @@ import {
   jobsOf,
   wavesOf,
   worktreeGuard,
+  deliverableOf,
+  designerGuard,
+  DESIGNER_TYPE,
 } from '../hooks/register'
 
 // The kit's `$` takes an event's full input; the plugin's calls take the short form.
@@ -761,7 +764,8 @@ test('a finished request goes into the history and announces itself', async ($, 
   on(
     'audio.play',
     (_$, e) =>
-      (played.push(String((e as unknown as { clip: { asset?: string } }).clip.asset)), { value: undefined }) as never,
+      (played.push(String((e as unknown as { clip: { asset?: string } }).clip.asset)),
+      { value: undefined }) as never,
   )
   on('process.run', (_$, e) => {
     const argv = (e as { argv: string[] }).argv
@@ -827,4 +831,70 @@ test('a finished request goes into the history and announces itself', async ($, 
     turnId: 'm2',
   } as never)
   expect(played).toEqual(['fx/done.wav'])
+})
+
+test("the planner's deliverable line and the designer's upload guard", async () => {
+  expect(deliverableOf('## Plan\nx\n## Deliverable: slides\nA deck for the board')).toBe('slides')
+  expect(deliverableOf('## Deliverable: **Report** for the CISO')).toBe('report')
+  expect(deliverableOf('no line')).toBe(null)
+  expect(designerGuard('Artifact')).toContain('local files only')
+  expect(designerGuard('mcp__claude_ai_Claude_Docs__batch')).toContain('refused')
+  expect(designerGuard('DesignSync')).toContain('refused')
+  expect(designerGuard('Write')).toBe(null)
+  expect(designerGuard('Skill')).toBe(null)
+})
+
+test('the designer runs on its own model, writes to the run folder and may not upload', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  host(on, [])
+  const prompts: string[] = []
+  let n = 0
+  on(
+    'agent.spawn',
+    (_$, e) => (prompts.push(e.prompt), { model: e.model ?? 'parent', agentId: `d${++n}` }),
+  )
+  on('turn.complete', (_$, e) => ({ text: (e as { answer: string }).answer }))
+  on('prompt.submit', (_$, e) => e as never)
+  on('tool.call', (_$, e) => ({ result: `ran ${String((e as { tool: string }).tool)}` }) as never)
+  await $.command.run({ command: 'fleet', args: '1 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'designer sonnet' } as never)
+  await $.prompt.submit(composer('Make a board deck'))
+
+  const planner = await $.agent.spawn({
+    prompt: 'Plan',
+    description: 'plan',
+    subagentType: PLANNER_TYPE,
+  } as never)
+  await $.turn.complete({
+    answer: '## Plan\nx\n## Deliverable: slides\n## Job 1: Content',
+    agentId: planner.agentId,
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 't',
+  } as never)
+  const designer = await $.agent.spawn({
+    prompt: 'Polish /tmp/combined.md',
+    description: 'deck',
+    subagentType: DESIGNER_TYPE,
+  } as never)
+
+  expect(designer.model).toBe('sonnet')
+  expect(prompts.at(-1)).toContain('Deliverable type named by the planner: slides.')
+  expect(prompts.at(-1)).toContain('/home/u/.claude/fleet-runs/repo/')
+  expect(prompts.at(-1)).toContain('/design')
+  const upload = await $.tool.call({
+    tool: 'Artifact',
+    agentId: designer.agentId,
+    action: 'publish',
+  } as never)
+  expect((upload as { deny?: string }).deny).toContain('local files only')
+  const write = await $.tool.call({
+    tool: 'Write',
+    agentId: designer.agentId,
+    file_path: '/x/a.md',
+    content: 'x',
+  } as never)
+  expect((write as { deny?: string }).deny).toBeUndefined()
 })

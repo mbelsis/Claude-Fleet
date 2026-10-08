@@ -10,6 +10,8 @@ export type FleetPlan = {
   models: FleetModel[]
   planner?: FleetLead
   reviewer?: FleetLead
+  /** Polishes the final result into files (documents, decks, web pages); uploads nothing. */
+  designer?: FleetLead
   /** The planner (or Claude) picks between 1 and `models.length` workers. */
   isAutoSize?: boolean
   /** A key of the pane's colour schemes. */
@@ -28,7 +30,7 @@ export type FleetPlan = {
 
 export type FleetStatus = 'running' | 'done' | 'failed' | 'stopped'
 
-export type FleetRole = 'planner' | 'worker' | 'reviewer' | 'other'
+export type FleetRole = 'planner' | 'worker' | 'reviewer' | 'designer' | 'other'
 
 /** `todo`: the agent's latest TodoWrite list. `tasks`: TaskCreate/TaskUpdate ids by status. */
 export type FleetSteps = {
@@ -92,6 +94,8 @@ export type FleetRequest = {
   cost?: number | null
   /** 0: under budget; 1: warned at 80%; 2: reached. */
   budgetLevel?: number
+  /** What the person should end up with, as the planner named it: report, slides, website, code, data. */
+  deliverable?: string | null
   /** The planner's jobs, with their waves read from the dependencies. */
   jobs?: FleetJob[]
   /** The commit and branch worktrees are cut from, when worktrees are on. */

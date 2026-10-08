@@ -55,6 +55,11 @@ import {
   taskOf,
   THEME_KEYS,
   DEFAULT_THEME,
+  DESIGNER_PROMPT,
+  DESIGNER_TYPE,
+  deliverableOf,
+  designerGuard,
+  designerOf,
   THEMES,
   themeOf,
   tokensText,
@@ -106,6 +111,7 @@ const PHASE_LABEL: Record<Phase, string> = {
   working: 'Workers running',
   combining: 'Combining results',
   reviewing: 'Reviewing',
+  designing: 'Designing',
   done: 'Done',
   stopped: 'Stopped',
 }
@@ -126,11 +132,13 @@ const roleLabel = (run: FleetRun): string =>
     ? 'planner'
     : run.role === 'reviewer'
       ? 'reviewer'
-      : run.job != null
-        ? `job ${run.job}`
-        : run.slot !== null
-          ? `agent ${run.slot + 1}`
-          : 'agent'
+      : run.role === 'designer'
+        ? 'designer'
+        : run.job != null
+          ? `job ${run.job}`
+          : run.slot !== null
+            ? `agent ${run.slot + 1}`
+            : 'agent'
 
 async function refreshStatus($: EngineInterface): Promise<void> {
   const list = await read($, runs)
@@ -309,6 +317,7 @@ async function createWorktree(
   request: FleetRequest,
   job: number,
   label: string,
+  name = `job-${job}`,
 ): Promise<FleetWorktree | string> {
   const repo = await $.session.repo()
   if (repo === null) return 'this project is not a git repository'
@@ -330,17 +339,18 @@ async function createWorktree(
     }
   }
   const existing = (await read($, worktrees)).find(
-    one => one.requestId === request.id && one.job === job && one.status === 'active',
+    one =>
+      one.requestId === request.id && one.id === `${request.id}-${name}` && one.status === 'active',
   )
   if (existing) return existing
   const home = await homeDir($)
   const repoName = slugOf(repo.root.split('/').pop() ?? 'repo')
-  const branch = `fleet/${request.id}/job-${job}`
-  const path = `${home}/.claude/fleet-worktrees/${repoName}/${request.id}-job-${job}`
+  const branch = `fleet/${request.id}/${name}`
+  const path = `${home}/.claude/fleet-worktrees/${repoName}/${request.id}-${name}`
   const added = await git($, ['worktree', 'add', '-b', branch, path, baseCommit], repo.root)
   if (added.exitCode !== 0) return added.stderr.trim() || 'git worktree add failed'
   const worktree: FleetWorktree = {
-    id: `${request.id}-job-${job}`,
+    id: `${request.id}-${name}`,
     repoRoot: repo.root,
     requestId: request.id,
     requestTitle: request.title,
@@ -716,6 +726,14 @@ export const register: Register = on => {
       tools: ['Read', 'Bash', 'WebSearch', 'WebFetch'],
       effort: 'high',
     })
+    await $.agent.register({
+      name: 'designer',
+      description:
+        "Designer of the agent fleet: polishes the fleet's final result into documents, decks or " +
+        'improved web pages as local files. Launch it last when the fleet plan has a designer.',
+      prompt: DESIGNER_PROMPT,
+      effort: 'high',
+    })
     await $.tool.register(PROGRESS_SPEC)
     $.clock.every(1000, async () => {
       ticks += 1
@@ -767,9 +785,14 @@ export const register: Register = on => {
       else for (const run of list.filter(one => one.status === 'running')) await stopRun($, run)
       return { text: 'Stopped the running fleet agents.' }
     }
-    if (head === 'planner' || head === 'reviewer') {
+    if (head === 'planner' || head === 'reviewer' || head === 'designer') {
       const current = await read($, plan)
-      const lead = head === 'planner' ? plannerOf(current) : reviewerOf(current)
+      const lead =
+        head === 'planner'
+          ? plannerOf(current)
+          : head === 'reviewer'
+            ? reviewerOf(current)
+            : designerOf(current)
       let chosen: FleetLead | null = null
       if (word === 'on' || word === 'off') chosen = { ...lead, isEnabled: word === 'on' }
       else if (isModel(word)) chosen = { isEnabled: true, model: word }
@@ -777,7 +800,8 @@ export const register: Register = on => {
         return { text: `Use /fleet ${head} on | off | ${LEAD_MODELS.join(' | ')}` }
       const value = chosen
       await savePlan($, plan0 => ({ ...plan0, [head]: value }))
-      const name = head === 'planner' ? 'Lead planner' : 'Reviewer'
+      const name =
+        head === 'planner' ? 'Lead planner' : head === 'reviewer' ? 'Reviewer' : 'Designer'
       return {
         text: value.isEnabled
           ? `${name} on, running on ${modelLabel(value.model)}.`
@@ -954,9 +978,11 @@ export const register: Register = on => {
         ? 'planner'
         : e.subagentType === REVIEWER_TYPE
           ? 'reviewer'
-          : active && isMain
-            ? 'worker'
-            : 'other'
+          : e.subagentType === DESIGNER_TYPE
+            ? 'designer'
+            : active && isMain
+              ? 'worker'
+              : 'other'
     const open = isMain ? await openRequest($) : undefined
     const requestId = rerunOf?.requestId ?? open?.id ?? null
     const request = requestId
@@ -989,6 +1015,32 @@ export const register: Register = on => {
         : ''
       input = { ...e, prompt: e.prompt + files }
       if (reviewer.model !== 'inherit') input = { ...input, model: reviewer.model }
+    } else if (role === 'designer' && !rerunOf) {
+      const designer = designerOf(fleet)
+      const kind = request?.deliverable ?? 'unknown'
+      const home = await homeDir($)
+      const folder = request?.runDir
+        ? `${request.runDir}/design`
+        : `${home}/.claude/fleet-runs/design-${slugOf(e.description || 'result')}`
+      outputPath = `${folder}/CHANGES.md`
+      let note =
+        `\n\nYour folder: ${folder} — write everything you produce there.` +
+        (request?.runDir
+          ? ` The run folder ${request.runDir} holds the plan, the workers' results and the combined result.`
+          : '') +
+        `\nDeliverable type named by the planner: ${kind}.`
+      let cwd: string | undefined
+      if (isWorktreesOn(fleet) && request && (kind === 'website' || kind === 'code')) {
+        const made = await createWorktree($, request, 0, 'designer', 'design')
+        if (typeof made === 'string') {
+          return { deny: `Agent fleet could not create a worktree for the designer: ${made}.` }
+        }
+        worktreeId = made.id
+        cwd = made.path
+        note += worktreeNote(made.path, made.branch, made.repoRoot)
+      }
+      input = { ...e, prompt: e.prompt + note, ...(cwd ? { cwd } : {}) }
+      if (designer.model !== 'inherit') input = { ...input, model: designer.model }
     } else if (role === 'worker' && !rerunOf) {
       const mine = list.filter(
         run => run.requestId === requestId && run.role === 'worker' && !isReplaced(run, list),
@@ -1067,7 +1119,9 @@ export const register: Register = on => {
             ? `Planner: ${e.description || 'plan'}`
             : role === 'reviewer'
               ? `Reviewer: ${e.description || 'review'}`
-              : e.description || e.subagentType,
+              : role === 'designer'
+                ? `Designer: ${e.description || 'design'}`
+                : e.description || e.subagentType,
         type: e.subagentType,
         model: started.model,
         slot,
@@ -1119,6 +1173,10 @@ export const register: Register = on => {
     if (agentId === undefined || tool === PROGRESS_TOOL) return next(e)
     const list = await read($, runs)
     const run = list.find(one => one.id === agentId)
+    if (run?.role === 'designer') {
+      const refused = designerGuard(tool)
+      if (refused !== null) return { deny: refused }
+    }
     if (run?.worktreeId) {
       const wt = (await read($, worktrees)).find(one => one.id === run.worktreeId)
       const request = (await read($, requests)).find(one => one.id === run.requestId)
@@ -1177,6 +1235,8 @@ export const register: Register = on => {
         const jobs = jobsOf(e.answer)
         const request = (await read($, requests)).find(one => one.id === run.requestId)
         if (request?.runDir) await $.fs.write(`${request.runDir}/plan.md`, e.answer)
+        const deliverable = deliverableOf(e.answer)
+        if (deliverable) await setRequest($, run.requestId, one => ({ ...one, deliverable }))
         if (jobs.length > 0) {
           const isAuto = (await read($, plan)).isAutoSize === true
           await setRequest($, run.requestId, one => ({
@@ -1353,6 +1413,7 @@ export const register: Register = on => {
     const ink = theme.text
     const planner = plannerOf(fleet)
     const reviewer = reviewerOf(fleet)
+    const designer = designerOf(fleet)
 
     const resize = (delta: number) =>
       savePlan($, current => {
@@ -1360,14 +1421,20 @@ export const register: Register = on => {
         const models = Array.from({ length: count }, (_, i) => current.models[i] ?? 'inherit')
         return { ...current, models }
       })
-    const toggleLead = (key: 'planner' | 'reviewer') =>
+    const leadOf = (current: FleetPlan, key: 'planner' | 'reviewer' | 'designer') =>
+      key === 'planner'
+        ? plannerOf(current)
+        : key === 'reviewer'
+          ? reviewerOf(current)
+          : designerOf(current)
+    const toggleLead = (key: 'planner' | 'reviewer' | 'designer') =>
       savePlan($, current => {
-        const lead = key === 'planner' ? plannerOf(current) : reviewerOf(current)
+        const lead = leadOf(current, key)
         return { ...current, [key]: { ...lead, isEnabled: !lead.isEnabled } }
       })
-    const cycleLead = (key: 'planner' | 'reviewer') =>
+    const cycleLead = (key: 'planner' | 'reviewer' | 'designer') =>
       savePlan($, current => {
-        const lead = key === 'planner' ? plannerOf(current) : reviewerOf(current)
+        const lead = leadOf(current, key)
         return { ...current, [key]: { ...lead, model: nextLeadModel(lead.model) } }
       })
     const cycleTheme = () =>
@@ -1616,6 +1683,25 @@ export const register: Register = on => {
             onPress={() => cycleLead('reviewer')}
           />
           <Text color={ink}> checks the combined result last</Text>
+        </Box>
+        <Box>
+          <Text color={ink}>Designer: </Text>
+          <Button
+            key="designer"
+            hotkey="d"
+            variant="primary"
+            label={designer.isEnabled ? 'On' : 'Off'}
+            onPress={() => toggleLead('designer')}
+          />
+          <Text color={ink}> </Text>
+          <Button
+            key="designer-model"
+            hotkey="n"
+            variant="primary"
+            label={modelLabel(designer.model)}
+            onPress={() => cycleLead('designer')}
+          />
+          <Text color={ink}> polishes the result into files, uploads nothing</Text>
         </Box>
         <Box>
           <Text color={ink}>Workers: {fleet.models.length} </Text>

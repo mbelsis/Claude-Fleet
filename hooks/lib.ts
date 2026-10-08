@@ -18,15 +18,18 @@ export const MAX_AGENTS = 10
 /** The lead agents' types as the Agent tool names them: `<plugin>:<name>`. */
 export const PLANNER_TYPE = 'agent-fleet:planner'
 export const REVIEWER_TYPE = 'agent-fleet:reviewer'
+export const DESIGNER_TYPE = 'agent-fleet:designer'
 /** The progress tool as a subagent calls it: `mcp__<plugin>__<name>`. */
 export const PROGRESS_TOOL = 'mcp__agent-fleet__progress'
 
 // `opus` is an alias, so a lead always runs on the newest Opus this build knows.
 const DEFAULT_PLANNER: FleetLead = { isEnabled: true, model: 'opus' }
 const DEFAULT_REVIEWER: FleetLead = { isEnabled: false, model: 'opus' }
+const DEFAULT_DESIGNER: FleetLead = { isEnabled: false, model: 'opus' }
 
 export const plannerOf = (fleet: FleetPlan): FleetLead => fleet.planner ?? DEFAULT_PLANNER
 export const reviewerOf = (fleet: FleetPlan): FleetLead => fleet.reviewer ?? DEFAULT_REVIEWER
+export const designerOf = (fleet: FleetPlan): FleetLead => fleet.designer ?? DEFAULT_DESIGNER
 export const isFileHandoffOn = (fleet: FleetPlan): boolean => fleet.isFileHandoff !== false
 export const isWorktreesOn = (fleet: FleetPlan): boolean => fleet.isWorktrees === true
 
@@ -92,6 +95,16 @@ const reviewStep = (fleet: FleetPlan): string[] =>
       ]
     : []
 
+const designStep = (fleet: FleetPlan): string[] =>
+  designerOf(fleet).isEnabled
+    ? [
+        `Design step (after any review): launch ONE Agent call with subagent_type "${DESIGNER_TYPE}" ` +
+          'whose prompt names the final result (its file path, or the text itself), the ' +
+          'deliverable type (report, slides, website, code or data) and who it is for. Give the ' +
+          'user the file paths it reports and its list of changes. It writes local files only.',
+      ]
+    : []
+
 const fileStep = (runDir: string | null | undefined): string[] =>
   runDir
     ? [
@@ -140,6 +153,7 @@ export function planText(fleet: FleetPlan): string {
             'Then combine their results for the user.',
         ]),
     ...reviewStep(fleet),
+    ...designStep(fleet),
     ...(isWorktreesOn(fleet)
       ? [
           'Worktrees are on: each worker edits its own git worktree and branch. Do not merge ' +
@@ -171,6 +185,7 @@ export function promptReminder(fleet: FleetPlan, runDir?: string | null): string
     ...(planner.isEnabled ? plannerSteps(fleet) : ['Then combine their results.']),
     ...fileStep(isFileHandoffOn(fleet) ? runDir : null),
     ...reviewStep(fleet),
+    ...designStep(fleet),
     'Skip this only if the message needs no work, or asks to change the agent fleet itself.',
   ].join('\n')
 }
@@ -187,6 +202,9 @@ export const PLANNER_PROMPT = [
   '',
   '## Plan',
   'Two or three sentences: the approach and how the parts fit together.',
+  '',
+  '## Deliverable: <report | slides | website | code | data>',
+  'One line: what the user should end up with, and for whom.',
   '',
   '## Job 1: <short title>',
   'A self-contained brief the worker can act on without seeing anything else: the goal, the ',
@@ -232,6 +250,53 @@ export const REVIEWER_PROMPT = [
   '## Still unverified',
   '(anything you could not settle)',
 ].join('\n')
+
+export const DESIGNER_PROMPT = [
+  'You are the designer of an agent fleet. The content is already written and reviewed; your ',
+  'job is to make it look and read as well as it can, without changing what it says.',
+  '',
+  'Your prompt names the result (a file path or the text), the deliverable type and the ',
+  'audience, and the fleet adds the folder you write into. Work by type:',
+  '- report or document: restructure for the reader (an executive summary first, clear ',
+  '  headings, short paragraphs, tables where they help). Write an improved Markdown copy, and ',
+  '  a .docx and a .pdf built with the docx and pdf skills (load them with the Skill tool).',
+  '- slides: build a .pptx with the pptx skill: one message per slide, at most six short ',
+  '  bullets, a chart or table wherever there are numbers, speaker notes with the detail.',
+  '- website or code with a user interface: open the pages in the browser (the claude-in-chrome ',
+  '  tools) at desktop and phone widths, take screenshots, then fix layout, spacing, contrast, ',
+  '  typography and accessibility in the code, and take screenshots again. Keep them in your folder.',
+  '- data: add the clearest charts and a summary table; keep the raw figures unchanged.',
+  '',
+  'Rules: never add facts, figures or claims, and never drop content the reviewer kept. Never ',
+  'overwrite the original files; write into your folder. Never upload, publish or share ',
+  'anything: no artifacts, no claude.ai documents, no external services. Those tools are ',
+  'refused for you. Finish by writing CHANGES.md in your folder (what you changed and why), ',
+  'then reply with the list of files you produced and a three-line summary.',
+].join('\n')
+
+/** Tools that would send work off the laptop; the designer may not use them. */
+export function designerGuard(tool: string): string | null {
+  const isUpload =
+    tool.startsWith('Artifact') ||
+    tool.startsWith('mcp__claude_ai_') ||
+    [
+      'DesignSync',
+      'ClaudeDesign',
+      'SendUserFile',
+      'SendFile',
+      'PublishPlugin',
+      'RemoteTrigger',
+    ].includes(tool)
+  return isUpload
+    ? `Agent fleet: the designer writes local files only; ${tool} would upload or publish, so it is refused.`
+    : null
+}
+
+/** The deliverable type a planner's answer names in its "## Deliverable:" line. */
+export function deliverableOf(answer: string): string | null {
+  const match = /^#{0,4}\s*Deliverable\s*[:\-–—]\s*\**\s*([A-Za-z]+)/im.exec(answer)
+  return match ? match[1]!.toLowerCase() : null
+}
 
 /** What a worker is asked to do so its progress can be measured. */
 export const PROGRESS_NOTE =
@@ -436,7 +501,8 @@ export function taskOf(prompt: string): string {
   return text.length > 220 ? `${text.slice(0, 219)}…` : text
 }
 
-export type Phase = 'planning' | 'working' | 'combining' | 'reviewing' | 'done' | 'stopped'
+export type Phase =
+  'planning' | 'working' | 'combining' | 'reviewing' | 'designing' | 'done' | 'stopped'
 
 /** Where a request stands, read from its agents. */
 export function phaseOf(request: FleetRequest, list: FleetRun[]): Phase {
@@ -444,6 +510,7 @@ export function phaseOf(request: FleetRequest, list: FleetRun[]): Phase {
   if (request.endedAt !== null) return 'done'
   const mine = list.filter(run => run.requestId === request.id)
   const isRunning = (role: FleetRole) => mine.some(r => r.role === role && r.status === 'running')
+  if (isRunning('designer')) return 'designing'
   if (isRunning('reviewer')) return 'reviewing'
   if (isRunning('worker') || isRunning('other')) return 'working'
   if (isRunning('planner')) return 'planning'
@@ -463,14 +530,17 @@ export function requestPercent(request: FleetRequest, list: FleetRun[], fleet: F
   const planners = mine.filter(run => run.role === 'planner')
   const workers = mine.filter(run => run.role === 'worker' || run.role === 'other')
   const reviewers = mine.filter(run => run.role === 'reviewer')
+  const designers = mine.filter(run => run.role === 'designer')
   const hasPlanner = plannerOf(fleet).isEnabled || planners.length > 0
   const hasReviewer = reviewerOf(fleet).isEnabled || reviewers.length > 0
+  const hasDesigner = designerOf(fleet).isEnabled || designers.length > 0
   const expected = Math.max(workers.length, request.expectedWorkers ?? fleet.models.length, 1)
-  const total = (hasPlanner ? 1 : 0) + expected + (hasReviewer ? 1 : 0) + 1
+  const total = (hasPlanner ? 1 : 0) + expected + (hasReviewer ? 1 : 0) + (hasDesigner ? 1 : 0) + 1
   const done =
     (hasPlanner ? share(planners[planners.length - 1]) : 0) +
     workers.reduce((sum, run) => sum + share(run), 0) +
-    (hasReviewer ? share(reviewers[reviewers.length - 1]) : 0)
+    (hasReviewer ? share(reviewers[reviewers.length - 1]) : 0) +
+    (hasDesigner ? share(designers[designers.length - 1]) : 0)
   return Math.min(99, Math.round((done / total) * 100))
 }
 
@@ -568,6 +638,7 @@ export const HELP_LINES: readonly string[] = [
   '/fleet use on | off        switch the fleet on or off for this project only',
   '/fleet planner on|off|M    lead planner, and its model (opus, fable, sonnet, inherit)',
   '/fleet reviewer on|off|M   reviewer that checks the combined result last',
+  '/fleet designer on|off|M   designer that polishes the result into files (uploads nothing)',
   '/fleet auto on|off         let the planner choose 1–N workers per task',
   '/fleet files on|off        workers write results to files in a run folder',
   '/fleet budget N | off      spending limit per request, in US dollars',
@@ -582,6 +653,7 @@ export const HELP_LINES: readonly string[] = [
   '/fleet stop                stop every running fleet agent',
   '/fleet clear               remove finished agents and requests',
   '/fleet help                show this list',
-  'Pane keys: t plan · p/o planner · r/e reviewer · f/m fewer/more · a count · 1–9 agent model',
+  'Pane keys: t plan · p/o planner · r/e reviewer · d/n designer · f/m fewer/more · a count',
+  '           1–9 agent model',
   '           b colours · s stop all · c clear · y history · h help',
 ]

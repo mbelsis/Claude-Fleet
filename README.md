@@ -5,6 +5,7 @@ A Claude Code plugin that splits each task across a fleet of subagents you confi
 - **Worker slots:** choose how many subagents a task uses (1–10) and which model each one runs on.
 - **Lead planner** (optional, on by default): thinks the task through first and writes one self-contained brief per worker. A job can depend on others (`## Job 3: … (after 1, 2)`); the fleet runs such jobs in waves and refuses to start a job before the jobs it needs have finished.
 - **Reviewer** (optional): checks and corrects the combined result last.
+- **Designer** (optional, off by default): after the review, polishes the result into finished files according to what the planner says the deliverable is — a report becomes an improved Markdown copy plus `.docx` and `.pdf`; slides become a `.pptx` (one message per slide, charts for numbers, speaker notes); a website or app screen is checked in the browser at desktop and phone widths and its layout, spacing, contrast and accessibility are fixed in the code (on its own branch when worktrees are on); data gets charts and a summary table. It works in the run folder's `design/` and writes `CHANGES.md` saying what it changed and why. It never adds facts, never overwrites the original, and **uploads nothing**: tools that would publish or send work off the laptop (artifacts, claude.ai documents, design sync and the like) are refused for it. `/fleet designer on | off | <model>`.
 - **Automatic sizing** (optional): the planner chooses between 1 and N workers per task.
 - **Run folders** (on by default): each request gets `~/.claude/fleet-runs/<project>/<date>-<title>/` holding the request, the plan, each worker's result (`job-N.md`), the combined result and a summary. Later waves receive the result files of the jobs they depend on.
 - **Progress:** a pane listing each request and its agents (model, completion, time, tool calls, tokens, the job each was given), a status band above the prompt with an overall progress bar and live cost, and Stop controls.
@@ -111,6 +112,7 @@ Uninstalling leaves your run folders (`~/.claude/fleet-runs/`) and any fleet wor
 /fleet use on | off        switch the fleet on or off for this project only
 /fleet planner on|off|M    lead planner, and its model (opus, fable, sonnet, inherit)
 /fleet reviewer on|off|M   reviewer that checks the combined result last
+/fleet designer on|off|M   designer that polishes the result into files (uploads nothing)
 /fleet auto on|off         let the planner choose 1–N workers per task
 /fleet files on|off        workers write results to files in a run folder
 /fleet budget N | off      spending limit per request, in US dollars
