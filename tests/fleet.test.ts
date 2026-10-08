@@ -695,3 +695,47 @@ test('budget "stop": at the limit the request stops and no further agent starts'
   const fresh = await $.agent.spawn({ prompt: 'c', description: 'c' } as never)
   expect(fresh.deny).toBeUndefined()
 })
+
+test('reaching the budget leaves a transcript line and tells Claude why', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  let usd = 1
+  const logs: string[] = []
+  const notes: string[] = []
+  on(
+    'session.usage',
+    () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd } } }) as never,
+  )
+  on('session.repo', () => ({ value: null }) as never)
+  on('session.root', () => ({ value: '/repo' }) as never)
+  on('env.get', () => ({ value: '/home/u' }) as never)
+  on('fs.write', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on(
+    'ui.log',
+    (_$, e) =>
+      (logs.push(String((e as { text?: string }).text ?? '')), { value: undefined }) as never,
+  )
+  on('session.append', (_$, e, next) => {
+    const content = (e as unknown as { message: { content: { text: string }[] } }).message.content
+    notes.push(content.map(block => block.text).join(''))
+    return next(e)
+  })
+  on('prompt.submit', (_$, e) => e as never)
+  on('tool.call', { tool: 'TaskStop' }, () => ({ result: 'stopped' }))
+  on('agent.spawn', (_$, e) => ({ model: e.model ?? 'parent', agentId: 'z1' }))
+  await $.command.run({ command: 'fleet', args: '1 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  await $.command.run({ command: 'fleet', args: 'budget 0.5' } as never)
+  await $.command.run({ command: 'fleet', args: 'budget stop' } as never)
+  await $.prompt.submit(composer('Work'))
+  await $.agent.spawn({ prompt: 'a', description: 'a' } as never)
+  usd = 1.7
+  const refused = await $.agent.spawn({ prompt: 'b', description: 'b' } as never)
+
+  expect(refused.deny).toContain('spent')
+  expect(
+    logs.some(line => line.includes('reached its $0.50 budget ($0.70 used) and was stopped')),
+  ).toBe(true)
+  expect(notes.some(note => note.includes('Do not relaunch'))).toBe(true)
+})

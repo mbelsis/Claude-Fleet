@@ -529,36 +529,57 @@ async function rerunRun(
 
 /** Keeps a request's live cost and acts on its budget. */
 async function tickBudget($: EngineInterface): Promise<void> {
-  const request = await openRequest($)
+  // The latest request, and for a minute after it ends too: responses still in flight when it
+  // stopped land afterwards, and the figure shown should include them.
+  const request = (await read($, requests)).at(-1)
   if (request === undefined || request.costAtStart == null) return
+  const at = await $.clock.now()
+  if (request.endedAt !== null && at - request.endedAt > 60_000) return
   const usd = (await $.session.usage()).cost?.usd
   if (usd === undefined) return
   const cost = Math.max(0, usd - request.costAtStart)
   const fleet = await read($, plan)
   const level = budgetLevel(cost, fleet.budgetUsd)
-  if (Math.abs(cost - (request.cost ?? 0)) >= 0.01 || level > (request.budgetLevel ?? 0)) {
+  const before = request.budgetLevel ?? 0
+  if (Math.abs(cost - (request.cost ?? 0)) >= 0.01 || level > before) {
     await setRequest($, request.id, one => ({
       ...one,
       cost,
       budgetLevel: Math.max(level, one.budgetLevel ?? 0),
     }))
   }
-  if (level > (request.budgetLevel ?? 0) && fleet.budgetUsd) {
-    if (level === 1) {
-      $.ui.toast(
-        `Agent fleet: "${request.title}" has used 80% of its ${usdText(fleet.budgetUsd)} budget.`,
-      )
-    } else if (fleet.budgetAction === 'stop') {
-      $.ui.toast(
-        `Agent fleet: budget ${usdText(fleet.budgetUsd)} reached — stopping "${request.title}".`,
-      )
-      await stopRequest($, request)
-    } else {
-      $.ui.toast(
-        `Agent fleet: "${request.title}" has reached its ${usdText(fleet.budgetUsd)} budget.`,
-      )
-    }
+  if (level <= before || !fleet.budgetUsd || request.endedAt !== null) return
+  const budget = usdText(fleet.budgetUsd)
+  if (level === 1) {
+    const line = `Agent fleet: "${request.title}" has used ${usdText(cost)} of its ${budget} budget.`
+    $.ui.toast(line)
+    $.ui.log(line)
+    return
   }
+  const isStop = fleet.budgetAction === 'stop'
+  const line =
+    `Agent fleet: "${request.title}" reached its ${budget} budget (${usdText(cost)} used)` +
+    (isStop ? ' and was stopped. No further agents start for it.' : '.')
+  // A toast passes quickly; the transcript line stays, and Claude is told why.
+  $.ui.toast(line)
+  $.ui.log(line)
+  await $.session.append({
+    message: {
+      type: 'user',
+      content: [
+        {
+          type: 'text',
+          text:
+            `[Agent fleet] This request reached the user's ${budget} budget (${usdText(cost)} used).` +
+            (isStop
+              ? ' The fleet stopped its agents and will refuse new ones. Do not relaunch them; tell ' +
+                'the user the budget was reached and offer to continue if they raise it (/fleet budget).'
+              : ' The user chose to be warned, not stopped; finish promptly and mention the cost.'),
+        },
+      ],
+    },
+  })
+  if (isStop) await stopRequest($, request)
 }
 
 export const register: Register = on => {
@@ -617,7 +638,8 @@ export const register: Register = on => {
         const at = await $.clock.now()
         await update($, now, () => at)
       }
-      if (open !== undefined && ticks % 3 === 0) await tickBudget($)
+      // The budget is checked every second: cost arrives in large steps as responses finish.
+      if ((await read($, plan)).budgetUsd) await tickBudget($)
       // A peek at a running agent refreshes every five seconds.
       const peeked = await read($, peek)
       if (peeked && ticks % 5 === 0) {
@@ -1158,11 +1180,15 @@ export const register: Register = on => {
     const barWidth = Math.max(10, Math.min(30, width - 50))
     const color = phase === 'done' ? 'success' : phase === 'stopped' ? 'warning' : 'claude'
     const budget = fleet.budgetUsd ? ` of ${usdText(fleet.budgetUsd)}` : ''
+    const phaseText =
+      phase === 'stopped' && (request.budgetLevel ?? 0) >= 2
+        ? 'Stopped at budget'
+        : PHASE_LABEL[phase]
     const pendingWorktrees = (await read($, worktrees)).filter(
       one => one.requestId === request.id && (one.status === 'ready' || one.status === 'conflict'),
     ).length
     const facts = [
-      PHASE_LABEL[phase],
+      phaseText,
       `workers ${workersDone}/${expected || '?'}`,
       ...(lastWave > 1 ? [`wave ${runningWave || '–'}/${lastWave}`] : []),
       elapsedText(request.startedAt, request.endedAt ?? at),
