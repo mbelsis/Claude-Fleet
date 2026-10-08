@@ -15,6 +15,16 @@ A Claude Code plugin that splits each task across a fleet of subagents you confi
 - **Worktrees** (optional, off by default): see below.
 - **Colours:** the pane has selectable colour schemes; navy is the default.
 
+## Screenshots
+
+The lead planner at work: `/fleet help` on the left, and on the right the pane with the plan (planner on, three workers on sonnet, sonnet and opus), the request in its Planning stage and its run folder. The status band above the prompt shows the overall progress.
+
+![The fleet planning a request](Screenshots/Screenshot%202026-10-08%20at%204.37.37%20PM.png)
+
+The plan has been shared out: the planner has finished (✓, 100%), and three workers run in parallel, each with its model, progress, elapsed time, tool count and current step, and under each the job it was given. Each row has *peek* and *stop*.
+
+![Three workers running the planner's jobs](Screenshots/Screenshot%202026-10-08%20at%204.39.04%20PM.png)
+
 ## Worktrees: how parallel code changes come back together
 
 With `/fleet worktrees on`, every worker edits its own git worktree on its own branch, so parallel workers never overwrite each other. The rules are built to never lose or overwrite code:
@@ -125,3 +135,13 @@ claude plugin test .       # runs tests/*.test.ts against the engine
 ## Contents
 
 - `docs/GRC-Tool-Specification.md` — a product specification for a GRC tool, produced by a fleet run (planner, four workers, reviewer): 428 requirements, every Must with acceptance criteria. Appendix B lists the open points, Appendix C the reviewer's changes.
+
+## Licence and disclaimer
+
+Copyright © 2026 Belsis Meletis.
+
+You may use this plugin free of charge, for any purpose, and copy, change or customise it as you want.
+
+**This is a test plugin.** It is provided as is, with no warranty of any kind. The creator accepts no responsibility for any action, loss or damage that results from installing, using or customising it, including lost or overwritten code, model usage charges, or anything an agent does while it runs. Use it at your own risk.
+
+The full terms are in [LICENSE](LICENSE).
