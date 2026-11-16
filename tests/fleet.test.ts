@@ -41,6 +41,9 @@ import {
   RESEARCHER_TYPE,
   SECURITY_TYPE,
   isQuickPrompt,
+  hasOpenPoints,
+  reviewNotDue,
+  REVIEWER_PROMPT,
   QUICK_NOTE,
 } from '../hooks/register'
 
@@ -1536,4 +1539,64 @@ test('a small request opens no fleet request and tells Claude to do it directly'
   await $.prompt.submit(composer('commit please'))
   expect(contexts.at(-1)?.[0]).toContain('Agent fleet is ON')
   expect(contexts.at(-1)?.[0]).not.toContain('Small requests')
+})
+
+test("a worker's open points are read from its reply", async () => {
+  expect(
+    hasOpenPoints('Done.\n\n## Unverified or conflicting\n- The 2023 figure has no source'),
+  ).toBe(true)
+  expect(hasOpenPoints('Done.\n\n**Unverified or conflicting:** the licence of lib X')).toBe(true)
+  expect(hasOpenPoints('Done.\n\n## Unverified or conflicting\nNone.')).toBe(false)
+  expect(hasOpenPoints('Done.\n\nUnverified or conflicting: nothing')).toBe(false)
+  expect(hasOpenPoints('Done.\n\n## Unverified or conflicting\n\n## Next')).toBe(false)
+  expect(hasOpenPoints('/runs/job-1.md — the schema')).toBe(false)
+  expect(reviewNotDue([{ hasOpenPoints: false }])).toContain('one worker ran')
+  expect(reviewNotDue([{ hasOpenPoints: true }])).toBe(null)
+  expect(reviewNotDue([{}, {}])).toBe(null)
+  // The reviewer returns edits, never the draft again.
+  expect(REVIEWER_PROMPT).toContain('Answer with edits only')
+  expect(REVIEWER_PROMPT).not.toContain('Corrected version')
+})
+
+test('with "reviewer auto" a one-worker request with nothing flagged gets no review', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  const world = memoryHost(on, { level: 60 })
+  await $.command.run({ command: 'fleet', args: '2 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  await $.command.run({ command: 'fleet', args: 'reviewer on' } as never)
+  const set = await $.command.run({ command: 'fleet', args: 'reviewer auto' } as never)
+  expect(set.text).toContain('only when two or more workers ran')
+  await $.command.run({ command: 'fleet', args: 'reviewer quick' } as never)
+  const done = (agentId: string | undefined, answer: string) =>
+    $.turn.complete({
+      answer,
+      agentId,
+      reason: 'answer',
+      durationMs: 1,
+      isAborted: false,
+      turnId: 't',
+    } as never)
+  const review = () =>
+    $.agent.spawn({ prompt: 'Draft', description: 'check', subagentType: REVIEWER_TYPE } as never)
+
+  await $.prompt.submit(composer('Tidy the settings page and its tests'))
+  const one = await $.agent.spawn({ prompt: '## Job 1: A\nGoal.', description: 'a' } as never)
+  await done(one.agentId, '/run/job-1.md\n\n## Unverified or conflicting\nNone.')
+  expect((await review()).deny).toContain('no review is due')
+
+  // A second worker makes the review due, and the quick mode is passed on.
+  const two = await $.agent.spawn({ prompt: '## Job 2: B\nGoal.', description: 'b' } as never)
+  await done(two.agentId, '/run/job-2.md')
+  expect((await review()).deny).toBeUndefined()
+  expect(world.spawned.at(-1)?.prompt).toContain('Quick review')
+
+  // One worker that flagged something is reviewed too.
+  await $.prompt.submit(composer('Write the pricing section of the report'))
+  const solo = await $.agent.spawn({ prompt: '## Job 1: A\nGoal.', description: 'a' } as never)
+  await done(
+    solo.agentId,
+    '/run/job-1.md\n\n## Unverified or conflicting\n- Competitor price is from 2023',
+  )
+  expect((await review()).deny).toBeUndefined()
 })

@@ -44,6 +44,13 @@ export type FleetPlan = {
    * fleet. On unless turned off.
    */
   isQuickDirect?: boolean
+  /**
+   * When the reviewer runs: on every request (`always`, the default), or only where a review
+   * pays (`auto`): two or more workers ran, or a worker listed points it could not verify.
+   */
+  reviewWhen?: 'always' | 'auto'
+  /** How much the reviewer checks: everything doubtful (`full`), or only what was flagged. */
+  reviewDepth?: 'full' | 'quick'
   /** Minutes without any activity after which an agent counts as stuck. Null: never. */
   stallMinutes?: number | null
   /** What the fleet does about a stuck agent. */
@@ -120,6 +127,8 @@ export type FleetRun = {
   busyTool?: string | null
   /** When the fleet found it stuck; cleared once it shows activity again. */
   stalledAt?: number | null
+  /** A worker's reply listed points it could not verify or found conflicting. */
+  hasOpenPoints?: boolean
   /** How many times the fleet has already restarted this job because it was stuck. */
   stallRestarts?: number
 }

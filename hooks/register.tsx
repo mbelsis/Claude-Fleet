@@ -77,6 +77,9 @@ import {
   worktreeGuard,
   worktreeNote,
   isAbandoned,
+  hasOpenPoints,
+  QUICK_REVIEW_NOTE,
+  reviewNotDue,
   isQuickDirectOn,
   isQuickPrompt,
   QUICK_NOTE,
@@ -1318,6 +1321,24 @@ export const register: Register = on => {
     }
     const leadKey: FleetLeadKey | null =
       head === 'research' ? 'researcher' : isLeadKey(head) ? head : null
+    if (leadKey === 'reviewer' && ['auto', 'always', 'quick', 'full'].includes(word)) {
+      if (word === 'auto' || word === 'always') {
+        await savePlan($, current => ({ ...current, reviewWhen: word }))
+      } else {
+        await savePlan($, current => ({ ...current, reviewDepth: word as 'quick' | 'full' }))
+      }
+      const fleet = await read($, plan)
+      return {
+        text:
+          (fleet.reviewWhen === 'auto'
+            ? 'The reviewer runs only when two or more workers ran or a worker flagged something'
+            : 'The reviewer runs on every request') +
+          (fleet.reviewDepth === 'quick'
+            ? ', and checks only the flagged points and contradictions, at medium effort.'
+            : ', and checks every doubtful claim.') +
+          (reviewerOf(fleet).isEnabled ? '' : ' It is off now: /fleet reviewer on.'),
+      }
+    }
     if (leadKey !== null) {
       const current = await read($, plan)
       const lead = leadOf(current, leadKey)
@@ -1723,11 +1744,25 @@ export const register: Register = on => {
       if (security.model !== 'inherit') input = { ...input, model: security.model }
     } else if (role === 'reviewer') {
       const reviewer = reviewerOf(fleet)
+      if (fleet.reviewWhen === 'auto' && request) {
+        const workers = list.filter(
+          run =>
+            run.requestId === request.id &&
+            run.role === 'worker' &&
+            run.status === 'done' &&
+            !isReplaced(run, list),
+        )
+        const notDue = reviewNotDue(workers)
+        if (notDue !== null) return { deny: notDue }
+      }
       const files = request?.runDir
         ? `\n\nThe run folder ${request.runDir} holds the plan (plan.md), each worker's result ` +
           '(job-N.md) and the combined result (combined.md) when it is long; read them there.'
         : ''
-      input = { ...e, prompt: e.prompt + files }
+      input = {
+        ...e,
+        prompt: e.prompt + files + (fleet.reviewDepth === 'quick' ? QUICK_REVIEW_NOTE : ''),
+      }
       if (reviewer.model !== 'inherit') input = { ...input, model: reviewer.model }
     } else if (role === 'designer' && !rerunOf) {
       const designer = designerOf(fleet)
@@ -1997,7 +2032,11 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     const agentId = e.agentId
     if (agentId === undefined) return yield* next(e)
-    const stream = next(e)
+    // A quick review thinks less: the reviewer's own setting is high effort.
+    const isQuickReview =
+      (await read($, plan)).reviewDepth === 'quick' &&
+      (await read($, runs)).some(run => run.id === agentId && run.role === 'reviewer')
+    const stream = next(isQuickReview ? { ...e, effort: 'medium' } : e)
     beats.set(agentId, (beats.get(agentId) ?? 0) + 1)
     for await (const chunk of stream) {
       beats.set(agentId, (beats.get(agentId) ?? 0) + 1)
@@ -2029,6 +2068,10 @@ export const register: Register = on => {
                 status: one.status === 'stopped' || one.status === 'paused' ? one.status : status,
                 endedAt: one.status === 'paused' ? null : at,
                 busyTool: null,
+                hasOpenPoints:
+                  one.role === 'worker' && status === 'done'
+                    ? hasOpenPoints(e.answer)
+                    : one.hasOpenPoints,
                 tokens: tokens === null ? one.tokens : (one.tokens ?? 0) + tokens,
               }
             : one,
@@ -2628,7 +2671,13 @@ export const register: Register = on => {
               ['p', 'o'],
               'thinks first, plans jobs and waves',
             )}
-            {leadRow('reviewer', 'Reviewer', reviewer, ['r', 'e'], 'checks the combined result')}
+            {leadRow(
+              'reviewer',
+              'Reviewer',
+              reviewer,
+              ['r', 'e'],
+              `checks the result · ${fleet.reviewWhen === 'auto' ? 'when it pays' : 'every request'} · ${fleet.reviewDepth === 'quick' ? 'quick' : 'full'}`,
+            )}
             {leadRow(
               'designer',
               'Designer',

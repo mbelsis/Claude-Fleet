@@ -141,8 +141,14 @@ const reviewStep = (fleet: FleetPlan): string[] =>
     ? [
         `Last step: launch ONE Agent call with subagent_type "${REVIEWER_TYPE}" whose prompt ` +
           "is your combined draft (or its file path) followed by every worker's notes on " +
-          'unverified or conflicting points. Give the user its corrected version and its list ' +
-          'of changes.',
+          'unverified or conflicting points. It answers with a list of exact edits, not a ' +
+          'rewritten draft: apply each edit yourself (to combined.md or the files it names, ' +
+          'with the Edit tool), then give the user the corrected result and its list of changes.' +
+          (fleet.reviewWhen === 'auto'
+            ? ' The review runs only where it pays: when two or more workers ran, or a worker ' +
+              'listed unverified or conflicting points. Otherwise skip it and give the user the ' +
+              'result as it is; the fleet refuses a review that is not due.'
+            : ''),
       ]
     : []
 
@@ -464,10 +470,14 @@ export const REVIEWER_PROMPT = [
   'source. Where a point stays unverified, soften it ("reportedly") or remove it. You are ',
   'read-only: never create, edit or delete files.',
   '',
-  'Answer with:',
-  '## Corrected version',
-  '(the full corrected text; for a draft too long to return, a numbered list of exact edits,',
-  'each as FIND: <verbatim existing text> / REPLACE: <new text>)',
+  'Answer with edits only. Never return the draft or a rewritten copy of it: whoever asked ',
+  'you applies your edits, and text you repeat is time the user waits.',
+  '## Edits',
+  '(a numbered list; each edit as',
+  ' FILE: <path, when the draft is in files>',
+  ' FIND: <the existing text, copied exactly and long enough to occur once>',
+  ' REPLACE: <the new text; empty to delete>',
+  ' Write "No edits needed." when the draft stands as it is.)',
   '## Changes',
   '(a short list: what you changed and why, with the source you relied on)',
   '## Still unverified',
@@ -496,6 +506,49 @@ export const DESIGNER_PROMPT = [
   'refused for you. Finish by writing CHANGES.md in your folder (what you changed and why), ',
   'then reply with the list of files you produced and a three-line summary.',
 ].join('\n')
+
+/** Added to the reviewer's prompt when the person asked for a quick review. */
+export const QUICK_REVIEW_NOTE =
+  "\n\nQuick review (set by the user): check only the points the workers' notes flag and " +
+  'contradictions between sections. Do not go looking for other doubtful claims, and do not ' +
+  'edit for style or repetition. Be brief.'
+
+/**
+ * Whether a worker's reply lists points it could not verify or found conflicting: the text
+ * under its "Unverified or conflicting" heading, unless that says there are none.
+ */
+export function hasOpenPoints(answer: string): boolean {
+  const lines = answer.split('\n')
+  const at = lines.findIndex(line => /unverified\s+(or|and|\/)\s+conflicting/i.test(line))
+  if (at < 0) return false
+  const inline = lines[at]!.replace(/^.*unverified\s+(or|and|\/)\s+conflicting[^:]*:?/i, '')
+  const rest: string[] = [inline]
+  for (const line of lines.slice(at + 1)) {
+    if (/^#{1,6}\s/.test(line.trim())) break
+    rest.push(line)
+  }
+  const body = rest
+    .join(' ')
+    .replace(/[*_`"“”>\-•()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (body === '') return false
+  return !/^(none|nothing|n\/?a|no\b|all (points|claims) (were )?verified)/i.test(body)
+}
+
+/**
+ * Under `/fleet reviewer auto`: why a review is not due for a request, or null when it is.
+ * A review pays when two or more workers ran, or any worker left open points.
+ */
+export function reviewNotDue(workers: Pick<FleetRun, 'hasOpenPoints'>[]): string | null {
+  if (workers.length >= 2 || workers.some(run => run.hasOpenPoints)) return null
+  return (
+    'Agent fleet: no review is due for this request (' +
+    (workers.length === 0 ? 'no worker ran' : 'one worker ran and flagged nothing') +
+    '; the user set /fleet reviewer auto). Give the user the result as it is, and do not ' +
+    'launch the reviewer again for it.'
+  )
+}
 
 /** Tools that would send work off the laptop; the designer may not use them. */
 export function designerGuard(tool: string): string | null {
@@ -1081,6 +1134,8 @@ export const HELP_LINES: readonly string[] = [
   '/fleet use on | off        switch the fleet on or off for this project only',
   '/fleet planner on|off|M    lead planner, and its model (opus, fable, sonnet, inherit)',
   '/fleet reviewer on|off|M   reviewer that checks the combined result last',
+  '/fleet reviewer auto|always  review only where it pays (2+ workers, or flagged points)',
+  '/fleet reviewer quick|full   check only what was flagged, or everything doubtful',
   '/fleet designer on|off|M   designer that polishes the result into files (uploads nothing)',
   '/fleet researcher on|off|M market research on the web before the planner plans',
   '/fleet security on|off|M   security review of what was built, as the last step (read-only)',

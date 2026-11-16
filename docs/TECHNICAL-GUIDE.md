@@ -43,7 +43,7 @@ hooks/
 types/
   index.d.ts          the state contract: every value the plugin keeps, typed
 tests/
-  fleet.test.ts       ~57 tests run by `claude plugin test .`
+  fleet.test.ts       ~59 tests run by `claude plugin test .`
 fx/
   done.wav alert.wav  the finish chimes (generated, ~25 KB each)
 docs/, Screenshots/   documentation
@@ -119,6 +119,8 @@ Claude launches parallel agents in one message, and their `agent.spawn` hooks ru
 **Pause and resume.** *Pause* only sets `pauseRequested`. The agent's next `tool.call` hook sees it, marks the run paused, stops the agent with `TaskStop`, tells Claude, and refuses the call — so the agent stops between steps and the refused call never ran. The aborted `turn.complete` keeps the run paused, and the request stays open. *Resume* calls `SendMessage` to the agent's id, which wakes it with its context; if that fails, the agent is rerun with its brief, progress and partial result.
 
 **Small requests.** `isQuickPrompt` (pure) recognises a message marked `quick:` or a short one about a git or housekeeping step with no work verb; for it `prompt.submit` opens no request and attaches `QUICK_NOTE` instead of the plan. Everything else carries `SMALL_RULE` in the plan and the reminder, which leaves the judgement to Claude. A request that ends with no agent launched is removed at the main `turn.complete` instead of being recorded.
+
+**Reviewer.** Its prompt asks for edits only (`FILE` / `FIND` / `REPLACE`), which Claude applies; in past runs the review was a fixed four to six minutes however small the work, much of it re-outputting the draft. With `reviewWhen: 'auto'` the reviewer's `agent.spawn` is refused unless `reviewNotDue` (pure) finds two or more finished workers or one whose reply had open points — `hasOpenPoints` reads the text under each worker's "Unverified or conflicting" heading at its `turn.complete`. With `reviewDepth: 'quick'` the spawn appends `QUICK_REVIEW_NOTE` and the `turn.step` hook sends the reviewer's requests at medium effort.
 
 **Researcher.** A registered agent type (`Read`, `Bash`, `WebSearch`, `WebFetch`; read-only) whose prompt asks for a fixed brief: summary, what exists, a feature comparison, recommendations for the plan, sources with URLs, and what stayed unverified. At its `turn.complete` the fleet writes the answer to `research.md` and sets `researchPath` on the request; the planner's `agent.spawn` appends that path, so the hand-over does not depend on Claude remembering it. Whether a request is worth researching is left to Claude (new work yes; fixes and small edits no), so it is asked for, not enforced.
 
