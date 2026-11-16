@@ -12,6 +12,10 @@ export type FleetPlan = {
   reviewer?: FleetLead
   /** Polishes the final result into files (documents, decks, web pages); uploads nothing. */
   designer?: FleetLead
+  /** Researches what already exists (competitors, features, sources) before the planner plans. */
+  researcher?: FleetLead
+  /** Reviews what the agents built for security problems, as the last step; read-only. */
+  security?: FleetLead
   /** The planner (or Claude) picks between 1 and `models.length` workers. */
   isAutoSize?: boolean
   /** A key of the pane's colour schemes. */
@@ -28,11 +32,40 @@ export type FleetPlan = {
   notify?: 'all' | 'sound' | 'banner' | 'off'
   /** How much of the agents' messages the transcript shows. Full unless changed. */
   messages?: 'full' | 'compact' | 'quiet'
+  /**
+   * Memory the laptop must keep available, in MB: below it no agent starts and running ones
+   * are acted on. Absent: a tenth of the installed memory (1 GB at least). Null: no guard.
+   */
+  memMinFreeMb?: number | null
+  /** What happens to running agents when available memory falls below the limit. */
+  memAction?: 'warn' | 'pause' | 'stop'
+  /**
+   * Small requests (a commit, a push, one command) are done by Claude directly, without the
+   * fleet. On unless turned off.
+   */
+  isQuickDirect?: boolean
+  /** Minutes without any activity after which an agent counts as stuck. Null: never. */
+  stallMinutes?: number | null
+  /** What the fleet does about a stuck agent. */
+  stallAction?: 'warn' | 'tell' | 'restart'
+}
+
+/** The lead agents, in the order they run. */
+export type FleetLeadKey = 'researcher' | 'planner' | 'reviewer' | 'designer' | 'security'
+
+/** The laptop's memory as last measured. */
+export type FleetMemory = {
+  availMb: number
+  totalMb: number
+  at: number
+  /** Below the limit, and not yet clearly back above it. */
+  isLow: boolean
 }
 
 export type FleetStatus = 'running' | 'paused' | 'done' | 'failed' | 'stopped'
 
-export type FleetRole = 'planner' | 'worker' | 'reviewer' | 'designer' | 'other'
+export type FleetRole =
+  'researcher' | 'planner' | 'worker' | 'reviewer' | 'designer' | 'security' | 'other'
 
 /** `todo`: the agent's latest TodoWrite list. `tasks`: TaskCreate/TaskUpdate ids by status. */
 export type FleetSteps = {
@@ -67,6 +100,8 @@ export type FleetRun = {
   task?: string
   /** The prompt as the agent's caller wrote it, before the fleet's notes: what a rerun repeats. */
   prompt?: string
+  /** What the fleet appended to that prompt (delivery, worktree, slots): a rerun gets it again. */
+  notes?: string
   /** The planner's job number this agent works on, when its brief names one. */
   job?: number | null
   /** Where the agent was asked to write its result. */
@@ -77,6 +112,16 @@ export type FleetRun = {
   rerunOf?: string | null
   /** The person asked to pause it: it stops at its next tool call. */
   pauseRequested?: boolean
+  /** Why it was paused, when the fleet did it and not the person. */
+  pauseReason?: 'memory' | null
+  /** When it last did anything: a model response arriving, or a tool call. */
+  lastActivityAt?: number
+  /** The tool call it is inside, while one runs. */
+  busyTool?: string | null
+  /** When the fleet found it stuck; cleared once it shows activity again. */
+  stalledAt?: number | null
+  /** How many times the fleet has already restarted this job because it was stuck. */
+  stallRestarts?: number
 }
 
 /** One job of a planner's plan, and the jobs it waits for. */
@@ -105,6 +150,10 @@ export type FleetRequest = {
   /** The commit and branch worktrees are cut from, when worktrees are on. */
   baseCommit?: string | null
   baseBranch?: string | null
+  /** The commit the project was at when the request started: what a security review diffs against. */
+  headAtStart?: string | null
+  /** Where the researcher's findings were saved. */
+  researchPath?: string | null
 }
 
 /**
@@ -166,6 +215,7 @@ declare module 'claude-code' {
       peek: FleetPeek | null
       history: FleetHistoryEntry[]
       isHistoryOpen: boolean
+      memory: FleetMemory | null
     }
   }
 }

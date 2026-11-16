@@ -2,6 +2,7 @@
 import type {
   FleetJob,
   FleetLead,
+  FleetLeadKey,
   FleetModel,
   FleetPlan,
   FleetProgress,
@@ -12,7 +13,7 @@ import type {
 } from '../types'
 
 /** Shown in the pane's footer; kept in step with .claude-plugin/plugin.json. */
-export const VERSION = '0.7.0'
+export const VERSION = '0.8.0'
 export const COPYRIGHT = '© Belsis Meletis'
 
 export const MODELS: FleetModel[] = ['inherit', 'opus', 'sonnet', 'haiku', 'fable']
@@ -23,6 +24,8 @@ export const MAX_AGENTS = 10
 export const PLANNER_TYPE = 'agent-fleet:planner'
 export const REVIEWER_TYPE = 'agent-fleet:reviewer'
 export const DESIGNER_TYPE = 'agent-fleet:designer'
+export const RESEARCHER_TYPE = 'agent-fleet:researcher'
+export const SECURITY_TYPE = 'agent-fleet:security'
 /** The progress tool as a subagent calls it: `mcp__<plugin>__<name>`. */
 export const PROGRESS_TOOL = 'mcp__agent-fleet__progress'
 
@@ -31,9 +34,53 @@ const DEFAULT_PLANNER: FleetLead = { isEnabled: true, model: 'opus' }
 const DEFAULT_REVIEWER: FleetLead = { isEnabled: false, model: 'opus' }
 const DEFAULT_DESIGNER: FleetLead = { isEnabled: false, model: 'opus' }
 
+// Research is mostly reading, so it starts on the cheaper model; a security review is judgement.
+const DEFAULT_RESEARCHER: FleetLead = { isEnabled: false, model: 'sonnet' }
+const DEFAULT_SECURITY: FleetLead = { isEnabled: false, model: 'opus' }
+
 export const plannerOf = (fleet: FleetPlan): FleetLead => fleet.planner ?? DEFAULT_PLANNER
 export const reviewerOf = (fleet: FleetPlan): FleetLead => fleet.reviewer ?? DEFAULT_REVIEWER
 export const designerOf = (fleet: FleetPlan): FleetLead => fleet.designer ?? DEFAULT_DESIGNER
+export const researcherOf = (fleet: FleetPlan): FleetLead => fleet.researcher ?? DEFAULT_RESEARCHER
+export const securityOf = (fleet: FleetPlan): FleetLead => fleet.security ?? DEFAULT_SECURITY
+
+/** The lead agents in the order they run, with the names the pane and the commands use. */
+export const LEAD_KEYS: readonly FleetLeadKey[] = [
+  'researcher',
+  'planner',
+  'reviewer',
+  'designer',
+  'security',
+]
+export const LEAD_NAME: Record<FleetLeadKey, string> = {
+  researcher: 'Researcher',
+  planner: 'Lead planner',
+  reviewer: 'Reviewer',
+  designer: 'Designer',
+  security: 'Security reviewer',
+}
+export const LEAD_TYPE: Record<FleetLeadKey, string> = {
+  researcher: RESEARCHER_TYPE,
+  planner: PLANNER_TYPE,
+  reviewer: REVIEWER_TYPE,
+  designer: DESIGNER_TYPE,
+  security: SECURITY_TYPE,
+}
+export const isLeadKey = (word: string): word is FleetLeadKey =>
+  (LEAD_KEYS as readonly string[]).includes(word)
+export const leadOf = (fleet: FleetPlan, key: FleetLeadKey): FleetLead =>
+  key === 'researcher'
+    ? researcherOf(fleet)
+    : key === 'planner'
+      ? plannerOf(fleet)
+      : key === 'reviewer'
+        ? reviewerOf(fleet)
+        : key === 'designer'
+          ? designerOf(fleet)
+          : securityOf(fleet)
+/** The lead role an agent type stands for, or null for any other agent. */
+export const leadOfType = (type: string): FleetLeadKey | null =>
+  LEAD_KEYS.find(key => LEAD_TYPE[key] === type) ?? null
 export const isFileHandoffOn = (fleet: FleetPlan): boolean => fleet.isFileHandoff !== false
 export const isWorktreesOn = (fleet: FleetPlan): boolean => fleet.isWorktrees === true
 
@@ -109,6 +156,41 @@ const designStep = (fleet: FleetPlan): string[] =>
       ]
     : []
 
+/** When a request is worth researching first, in the words Claude is given. */
+const RESEARCH_WHEN =
+  'when the request starts something new (a project, product, feature, book, paper, piece of ' +
+  'research, presentation or other content) where knowing what already exists changes the ' +
+  'plan. Skip it for bug fixes, refactors, small edits and questions.'
+
+const researchStep = (fleet: FleetPlan): string[] =>
+  researcherOf(fleet).isEnabled
+    ? [
+        `Research step (first of all): ${RESEARCH_WHEN} Launch ONE Agent call with subagent_type ` +
+          `"${RESEARCHER_TYPE}" whose prompt is the user's idea in full, what kind of result they ` +
+          'want and who it is for, and wait for it. It searches the web for competing and ' +
+          'alternative work and returns a research brief. ' +
+          (plannerOf(fleet).isEnabled
+            ? "The fleet saves the brief and names its file in the planner's prompt; where there " +
+              "is no run folder, paste the brief into the planner's prompt yourself."
+            : 'Use the brief when you split the work, and give each worker the findings (or the ' +
+              'research file path) its part needs.'),
+      ]
+    : []
+
+const securityStep = (fleet: FleetPlan): string[] =>
+  securityOf(fleet).isEnabled
+    ? [
+        'Security step (the very last, after any review and design): when this request created ' +
+          'or changed code, scripts, configuration, infrastructure or an AI agent (its prompts, ' +
+          `tools or permissions), launch ONE Agent call with subagent_type "${SECURITY_TYPE}" ` +
+          'whose prompt says what was built, lists the files and folders that were created or ' +
+          'changed, and repeats anything the workers flagged. It is read-only and fixes nothing. ' +
+          'Give the user its verdict and its findings, most severe first, with the report path, ' +
+          'and ask before fixing anything. Skip it when the request produced only documents, ' +
+          'slides or other text.',
+      ]
+    : []
+
 const fileStep = (runDir: string | null | undefined): string[] =>
   runDir
     ? [
@@ -134,6 +216,46 @@ const plannerSteps = (fleet: FleetPlan): string[] => {
   ]
 }
 
+export const isQuickDirectOn = (fleet: FleetPlan): boolean => fleet.isQuickDirect !== false
+
+/** The rule that keeps small requests away from the fleet, in the words Claude is given. */
+const SMALL_RULE =
+  'Small requests do not go to the fleet: do them yourself, directly, with no planner and no ' +
+  'subagent. Small means a git or housekeeping step (commit, push, pull, open a pull request, ' +
+  'tag, check status), running one command, an edit to a line or two, a follow-up question ' +
+  'about work already done, or anything else you can finish in a few tool calls. Use the fleet ' +
+  'only for work that really divides into parts.'
+
+/** Attached beside a prompt the fleet recognised as a small request, in place of the plan. */
+export const QUICK_NOTE =
+  'Agent fleet: this message is a small, direct request, so the fleet plan does not apply to ' +
+  'it. Do it yourself now: no researcher, planner, worker, reviewer, designer or security ' +
+  'agent, and no other subagent.'
+
+const QUICK_PREFIX = /^\s*(quick|direct)\s*[:,-]\s*/i
+/** Words of a git or housekeeping step. */
+const QUICK_WORDS =
+  /\b(commit|commits|committed|push|pushed|pull|fetch|rebase|stash|git|tag|pr|pull request|branch|status|diff|changelog|amend|stage|unstage)\b/i
+/** Words that mean real work, whatever else the message says. */
+const WORK_WORDS =
+  /\b(implement|build|write|create|develop|design|refactor|rewrite|research|fix|add|plan|review|analy[sz]e|investigate|migrate|convert|generate)\b/i
+
+/**
+ * Whether a message is a small request the fleet should stay out of: one the person marked
+ * with "quick:" or "direct:", or a short one (12 words at most, nothing pasted) about a git or
+ * housekeeping step that asks for no real work. "commit please", "push to git", "commit and
+ * push" are; "write a commit hook" and "fix the merge conflicts" are not.
+ */
+export function isQuickPrompt(text: string): boolean {
+  if (QUICK_PREFIX.test(text)) return true
+  if (/<pasted_content/i.test(text)) return false
+  const words = text.trim().split(/\s+/).filter(Boolean)
+  if (words.length === 0 || words.length > 12) return false
+  if (WORK_WORDS.test(text)) return false
+  const isOpenPr = /\b(open|make|raise)\b.*\b(pr|pull request)\b/i.test(text)
+  return QUICK_WORDS.test(text) || isOpenPr
+}
+
 export function planText(fleet: FleetPlan): string {
   const count = workerCount(fleet)
   const planner = plannerOf(fleet)
@@ -144,6 +266,7 @@ export function planText(fleet: FleetPlan): string {
       `subtasks and handed to ${count} worker subagents with the Agent tool. Models are ` +
       'assigned automatically (Job N goes to Agent N), so do not set the `model` parameter:',
     ...slotLines(fleet),
+    ...researchStep(fleet),
     ...(planner.isEnabled
       ? [
           `A lead planner (${modelLabel(planner.model)}) does the thinking first and does not ` +
@@ -158,6 +281,7 @@ export function planText(fleet: FleetPlan): string {
         ]),
     ...reviewStep(fleet),
     ...designStep(fleet),
+    ...securityStep(fleet),
     ...(isWorktreesOn(fleet)
       ? [
           'Worktrees are on: each worker edits its own git worktree and branch. Do not merge ' +
@@ -166,6 +290,7 @@ export function planText(fleet: FleetPlan): string {
       : []),
     'Launching more workers than this per request is refused. Exempt: a question you can ' +
       'answer directly with no work, and requests to change the agent fleet itself.',
+    ...(isQuickDirectOn(fleet) ? [SMALL_RULE] : []),
   ].join('\n')
 }
 
@@ -186,11 +311,15 @@ export function promptReminder(fleet: FleetPlan, runDir?: string | null): string
   return [
     head,
     ...slotLines(fleet),
+    ...researchStep(fleet),
     ...(planner.isEnabled ? plannerSteps(fleet) : ['Then combine their results.']),
     ...fileStep(isFileHandoffOn(fleet) ? runDir : null),
     ...reviewStep(fleet),
     ...designStep(fleet),
-    'Skip this only if the message needs no work, or asks to change the agent fleet itself.',
+    ...securityStep(fleet),
+    isQuickDirectOn(fleet)
+      ? `${SMALL_RULE} Also skip it for requests to change the agent fleet itself.`
+      : 'Skip this only if the message needs no work, or asks to change the agent fleet itself.',
   ].join('\n')
 }
 
@@ -231,6 +360,96 @@ export const PLANNER_PROMPT = [
   'The slot message says how many jobs to write: exactly the number of slots, or, when it lets ',
   'you choose, as many as the task really divides into (one is fine for a small task). Return ',
   'only the plan.',
+].join('\n')
+
+export const RESEARCHER_PROMPT = [
+  'You are the market researcher of an agent fleet. You run before the planner: you find out ',
+  'what already exists, so the plan is built on evidence and not on guesses. You receive the ',
+  "user's idea: a new project or product, a feature, a book, a piece of research, a presentation ",
+  'or other content.',
+  '',
+  'Search the web thoroughly, with many different queries, and open the pages that matter ',
+  'instead of trusting search snippets. Follow the kind of work:',
+  '- product, software or feature: competing products, alternatives that solve the same need ',
+  '  another way, open-source projects; for each, its features and functions, pricing or ',
+  '  licence, who it is for, what users praise and complain about (reviews, forums, issue ',
+  '  trackers), its documentation and changelog.',
+  '- book, report, paper or research: existing books and their tables of contents, papers, ',
+  '  PDFs and reports, standards, surveys and datasets; what is well covered and what is not.',
+  '- presentation or other content: published decks, talks and YouTube videos on the topic, ',
+  '  articles and news, the angles and examples they use, good charts, images and videos.',
+  'Use every source type that fits: product pages, documentation, PDFs, news, videos (title, ',
+  'channel and what they show), books and decks. If the idea touches files or code in this ',
+  'project, read them first to learn what already exists here. You are read-only: never ',
+  'create, edit or delete files, and run only commands that change nothing.',
+  '',
+  'Answer with a research brief, in this format (2,500 words at most; tables over prose):',
+  '',
+  '## Summary',
+  'Five lines at most: the landscape, and the opening the user has in it.',
+  '## What exists',
+  'A table: name, kind (competitor, alternative, open source, book, deck, video, …), who it is ',
+  'for, what stands out, URL.',
+  '## Features and content compared',
+  'A table of features, functions or topics against the main entries: what everyone has (the ',
+  'expected minimum), what only some have (differentiators), and what nobody does well (gaps).',
+  '## Recommendations for the plan',
+  'Must include, should include, could include, and leave out, each with a one-line reason ',
+  'tied to a source. Where they help, name text, images, charts, video or demos worth having.',
+  '## Sources',
+  'Every source you relied on, with its URL and one line on what it gave you.',
+  '## Unverified or conflicting',
+  'What you could not confirm, and where sources disagree.',
+  '',
+  'Rules: every claim about a product or publication carries its URL. Never invent a product, ',
+  'a feature, a price, a quotation or a source; if you could not open a page, say so. Say when ',
+  'a source is old. Report what exists and what follows from it; the planner decides the plan.',
+].join('\n')
+
+export const SECURITY_PROMPT = [
+  'You are the security reviewer of an agent fleet. You run last: you review what the ',
+  "fleet's agents built or changed for this request, before the user relies on it. Your prompt ",
+  'says what was built and where; the fleet adds the run folder, the commit the project ',
+  'started from, and any worktree branches that hold the changes.',
+  '',
+  'Scope: the code, scripts, configuration and infrastructure this request created or ',
+  'changed, and the existing code those changes call or expose. Find the changes with git ',
+  '(git status, git diff against the starting commit or the branches named) and read the ',
+  'files in full; do not review from summaries. You are read-only: never create, edit or ',
+  'delete files, never fix what you find, run only commands that change nothing, never ',
+  'attack a running system, and never send code or secrets anywhere.',
+  '',
+  'Check, where it applies:',
+  '- injection (SQL, command, template, path traversal), unsafe deserialisation, SSRF, XSS, ',
+  '  CSRF, open redirects, unsafe file handling and uploads;',
+  '- authentication, session handling and authorisation on every new entry point, including ',
+  "  access to other users' or tenants' data;",
+  '- secrets: keys, tokens or passwords in code, configuration, logs, tests or commits;',
+  '- input validation, error handling that leaks detail, logging of personal or secret data;',
+  '- cryptography: home-made schemes, weak algorithms, fixed keys or IVs, poor randomness;',
+  '- dependencies added or changed: known vulnerabilities, unmaintained or look-alike ',
+  '  packages, install scripts, unpinned versions;',
+  '- configuration and infrastructure: debug modes, permissive CORS, default credentials, ',
+  '  public buckets or ports, over-broad cloud or CI permissions, containers run as root;',
+  '- for AI agents and LLM features: prompt injection through any content the model reads ',
+  '  (files, web pages, tool results, user input), tools or permissions broader than the task ',
+  '  needs, destructive or outward-facing actions without human approval, secrets or personal ',
+  '  data placed in prompts or sent to a model or a third party, model output used unchecked ',
+  '  in a shell, a query, HTML or a file path, unbounded loops and spend, trust in MCP servers ',
+  '  or plugins, and memory or logs that keep sensitive data.',
+  '',
+  'Answer with:',
+  '## Verdict',
+  'One line: no findings, minor findings, or do not ship before fixing, and why.',
+  '## Findings',
+  'Most severe first. For each: severity (Critical, High, Medium, Low), file and line, what is ',
+  'wrong, a concrete way it goes wrong (input or state, then the result), and the fix. Only ',
+  'what you verified in the code: mark anything you suspect but could not confirm as ',
+  '"possible".',
+  '## Checked and found sound',
+  'What you reviewed that needs no change.',
+  '## Not reviewed',
+  'What was out of reach or out of scope, so nobody assumes it was covered.',
 ].join('\n')
 
 export const REVIEWER_PROMPT = [
@@ -506,7 +725,16 @@ export function taskOf(prompt: string): string {
 }
 
 export type Phase =
-  'planning' | 'working' | 'paused' | 'combining' | 'reviewing' | 'designing' | 'done' | 'stopped'
+  | 'researching'
+  | 'planning'
+  | 'working'
+  | 'paused'
+  | 'combining'
+  | 'reviewing'
+  | 'designing'
+  | 'securing'
+  | 'done'
+  | 'stopped'
 
 /** Where a request stands, read from its agents. */
 export function phaseOf(request: FleetRequest, list: FleetRun[]): Phase {
@@ -516,10 +744,12 @@ export function phaseOf(request: FleetRequest, list: FleetRun[]): Phase {
   const isRunning = (role: FleetRole) => mine.some(r => r.role === role && r.status === 'running')
   if (!mine.some(r => r.status === 'running') && mine.some(r => r.status === 'paused'))
     return 'paused'
+  if (isRunning('security')) return 'securing'
   if (isRunning('designer')) return 'designing'
   if (isRunning('reviewer')) return 'reviewing'
   if (isRunning('worker') || isRunning('other')) return 'working'
   if (isRunning('planner')) return 'planning'
+  if (isRunning('researcher')) return 'researching'
   if (mine.some(run => run.role === 'worker')) return 'combining'
   return mine.some(run => run.role === 'planner') ? 'working' : 'planning'
 }
@@ -541,12 +771,34 @@ export function requestPercent(request: FleetRequest, list: FleetRun[], fleet: F
   const workers = mine.filter(run => run.role === 'worker' || run.role === 'other')
   const reviewers = mine.filter(run => run.role === 'reviewer')
   const designers = mine.filter(run => run.role === 'designer')
+  const researchers = mine.filter(run => run.role === 'researcher')
+  const securers = mine.filter(run => run.role === 'security')
+  // A researcher or a security reviewer the plan has but this request skipped still counts
+  // until the request ends, which is when the bar reaches 100.
+  const hasResearcher = researcherOf(fleet).isEnabled || researchers.length > 0
+  const hasSecurity = securityOf(fleet).isEnabled || securers.length > 0
   const hasPlanner = plannerOf(fleet).isEnabled || planners.length > 0
   const hasReviewer = reviewerOf(fleet).isEnabled || reviewers.length > 0
   const hasDesigner = designerOf(fleet).isEnabled || designers.length > 0
   const expected = Math.max(workers.length, request.expectedWorkers ?? fleet.models.length, 1)
-  const total = (hasPlanner ? 1 : 0) + expected + (hasReviewer ? 1 : 0) + (hasDesigner ? 1 : 0) + 1
+  const total =
+    (hasResearcher ? 1 : 0) +
+    (hasPlanner ? 1 : 0) +
+    expected +
+    (hasReviewer ? 1 : 0) +
+    (hasDesigner ? 1 : 0) +
+    (hasSecurity ? 1 : 0) +
+    1
+  // Once the planner or a worker has started, the research step is behind us, run or skipped.
+  const researchShare =
+    researchers.length > 0
+      ? share(researchers[researchers.length - 1])
+      : planners.length + workers.length > 0
+        ? 1
+        : 0
   const done =
+    (hasResearcher ? researchShare : 0) +
+    (hasSecurity ? share(securers[securers.length - 1]) : 0) +
     (hasPlanner ? share(planners[planners.length - 1]) : 0) +
     workers.reduce((sum, run) => sum + share(run), 0) +
     (hasReviewer ? share(reviewers[reviewers.length - 1]) : 0) +
@@ -585,6 +837,122 @@ export function budgetLevel(cost: number, budgetUsd: number | null | undefined):
   if (!budgetUsd || budgetUsd <= 0) return 0
   if (cost >= budgetUsd) return 2
   return cost >= budgetUsd * 0.8 ? 1 : 0
+}
+
+/** `2.4 GB`, or `850 MB` under one gigabyte. */
+export const memText = (mb: number): string =>
+  mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`
+
+/**
+ * `/fleet memory 4g`, `4096m`, `2.5gb`: megabytes, or null when it is not an amount. A bare
+ * number is gigabytes up to 256 and megabytes above.
+ */
+export function parseMemory(word: string): number | null {
+  const match = /^(\d+(?:\.\d+)?)\s*(g|gb|m|mb)?$/.exec(word.trim().toLowerCase())
+  if (match === null) return null
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  const unit = match[2] ?? (amount <= 256 ? 'g' : 'm')
+  return Math.round(unit.startsWith('g') ? amount * 1024 : amount)
+}
+
+/**
+ * Memory from macOS `sysctl -n kern.memorystatus_level hw.memsize`: the kernel's own
+ * percentage of memory still available (what `memory_pressure` prints), and the bytes installed.
+ */
+export function memoryFromSysctl(stdout: string): { availMb: number; totalMb: number } | null {
+  const [level, bytes] = stdout.trim().split(/\s+/).map(Number)
+  if (level === undefined || bytes === undefined) return null
+  if (!Number.isFinite(level) || !Number.isFinite(bytes) || level < 0 || level > 100) return null
+  if (bytes < 64 * 1024 * 1024) return null
+  const totalMb = Math.round(bytes / 1024 / 1024)
+  return { availMb: Math.round((totalMb * level) / 100), totalMb }
+}
+
+/** Memory from Linux `/proc/meminfo`: MemAvailable and MemTotal, in kB. */
+export function memoryFromMeminfo(text: string): { availMb: number; totalMb: number } | null {
+  const kb = (name: string) => {
+    const match = new RegExp(`^${name}:\\s+(\\d+)\\s*kB`, 'm').exec(text)
+    return match ? Number(match[1]) : null
+  }
+  const total = kb('MemTotal')
+  const avail = kb('MemAvailable')
+  if (total === null || avail === null || total <= 0) return null
+  return { availMb: Math.round(avail / 1024), totalMb: Math.round(total / 1024) }
+}
+
+/**
+ * The memory that must stay available, in MB, or null when the guard is off. Unset, it is a
+ * tenth of what is installed and 1 GB at least.
+ */
+export function memoryLimitMb(fleet: FleetPlan, totalMb: number): number | null {
+  if (fleet.memMinFreeMb === null) return null
+  return fleet.memMinFreeMb ?? Math.max(1024, Math.round(totalMb / 10))
+}
+
+/**
+ * Whether memory counts as low: below the limit, and once low, until it is a quarter above
+ * the limit again, so a reading that hovers at the limit does not flip back and forth.
+ */
+export const isMemoryLow = (availMb: number, limitMb: number, wasLow: boolean): boolean =>
+  availMb < limitMb || (wasLow && availMb < limitMb * 1.25)
+
+export const DEFAULT_STALL_MINUTES = 15
+/** Minutes of silence after which an agent counts as stuck, or null when that is off. */
+export const stallMinutesOf = (fleet: FleetPlan): number | null =>
+  fleet.stallMinutes === null ? null : (fleet.stallMinutes ?? DEFAULT_STALL_MINUTES)
+export const stallActionOf = (fleet: FleetPlan): 'warn' | 'tell' | 'restart' =>
+  fleet.stallAction ?? 'restart'
+
+/** Tool calls that legitimately stay silent for long: an agent waiting for its own agents. */
+const SLOW_TOOLS = ['Agent', 'Task', 'Workflow']
+
+/**
+ * How long an agent has been silent when that is longer than it may be, else null. An agent
+ * inside a call that waits for other agents, or that the engine lists as waiting on its own
+ * background work, gets three times the limit.
+ */
+export function stalledFor(
+  run: Pick<FleetRun, 'status' | 'startedAt' | 'lastActivityAt' | 'busyTool' | 'pauseRequested'>,
+  at: number,
+  minutes: number,
+  isWaiting = false,
+): number | null {
+  if (run.status !== 'running' || run.pauseRequested) return null
+  const quiet = at - (run.lastActivityAt ?? run.startedAt)
+  const patient = isWaiting || (run.busyTool != null && SLOW_TOOLS.includes(run.busyTool))
+  return quiet >= minutes * 60_000 * (patient ? 3 : 1) ? quiet : null
+}
+
+/** A stuck agent that was stopped: its job may be launched again, and it holds no slot. */
+export const isAbandoned = (run: Pick<FleetRun, 'status' | 'stalledAt'>): boolean =>
+  run.stalledAt != null && (run.status === 'stopped' || run.status === 'failed')
+
+/** Where a stuck agent stopped moving, for the messages about it. */
+export const stallPlace = (run: Pick<FleetRun, 'busyTool' | 'lastTool'>): string =>
+  run.busyTool
+    ? `inside a ${run.busyTool} call`
+    : run.lastTool
+      ? `after its last ${run.lastTool} call`
+      : 'before its first tool call'
+
+/** Added to the brief of an agent the fleet starts again because the first try got stuck. */
+export function stallNote(
+  run: Pick<FleetRun, 'busyTool' | 'lastTool' | 'progress' | 'outputPath'>,
+  minutes: number,
+): string {
+  const done = run.progress
+    ? ` It had finished ${run.progress.done} of ${run.progress.total} steps (next: ${run.progress.step}).`
+    : ''
+  const partial = run.outputPath
+    ? ` Any partial result is in ${run.outputPath}; check it and build on it.`
+    : ''
+  return (
+    `An earlier attempt at this job stopped moving for ${minutes} minutes ${stallPlace(run)} ` +
+    `and was stopped.${done}${partial} Do not repeat what hung: start servers and other ` +
+    'long-running commands in the background, give commands a timeout, and never run one that ' +
+    'waits for input.'
+  )
 }
 
 /** A folder-safe name: lower case, letters, digits and dashes, at most 40 characters. */
@@ -659,9 +1027,11 @@ export function titleOf(text: string): string {
  * on the dark schemes and on the light ones alike.
  */
 export const ROLE_COLOR: Partial<Record<FleetRole, string>> = {
+  researcher: '#2fb5a0',
   planner: '#a371f7',
   reviewer: '#2f9fd8',
   designer: '#e0569b',
+  security: '#d9822b',
 }
 
 /** Transcript rows that agents create: their completion notices and the reports they send. */
@@ -712,6 +1082,13 @@ export const HELP_LINES: readonly string[] = [
   '/fleet planner on|off|M    lead planner, and its model (opus, fable, sonnet, inherit)',
   '/fleet reviewer on|off|M   reviewer that checks the combined result last',
   '/fleet designer on|off|M   designer that polishes the result into files (uploads nothing)',
+  '/fleet researcher on|off|M market research on the web before the planner plans',
+  '/fleet security on|off|M   security review of what was built, as the last step (read-only)',
+  '/fleet memory N | off      memory to keep available (4g, 4096m): below it no agent starts',
+  '/fleet memory warn|pause|stop   what happens to running agents when memory runs low',
+  '/fleet stuck N | off       minutes without activity before an agent counts as stuck',
+  '/fleet stuck warn|tell|restart  only warn you, hand it to Claude, or restart it once',
+  '/fleet quick on|off        small requests (commit, push, one command) skip the fleet',
   '/fleet auto on|off         let the planner choose 1–N workers per task',
   '/fleet files on|off        workers write results to files in a run folder',
   '/fleet budget N | off      spending limit per request, in US dollars',
@@ -728,7 +1105,8 @@ export const HELP_LINES: readonly string[] = [
   '/fleet stop                stop every running fleet agent',
   '/fleet clear               remove finished agents and requests',
   '/fleet help                show this list',
-  'Pane keys: t plan · p/o planner · r/e reviewer · d/n designer · f/m fewer/more · a count',
+  'Pane keys: t plan · i/j researcher · p/o planner · r/e reviewer · d/n designer',
+  '           k/z security · f/m fewer/more · a count',
   '           1–9 agent model',
   '           b colours · s stop all · x pause or resume all · c clear · y history · v messages',
   '           h help',

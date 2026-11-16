@@ -2,7 +2,7 @@
 
 How the fleet is built, how each feature works inside, the safety decisions behind it, and how to extend it. For using it, see the [README](../README.md).
 
-Version 0.7.0 · © 2026 Belsis Meletis
+Version 0.8.0 · © 2026 Belsis Meletis
 
 ---
 
@@ -43,7 +43,7 @@ hooks/
 types/
   index.d.ts          the state contract: every value the plugin keeps, typed
 tests/
-  fleet.test.ts       ~46 tests run by `claude plugin test .`
+  fleet.test.ts       ~57 tests run by `claude plugin test .`
 fx/
   done.wav alert.wav  the finish chimes (generated, ~25 KB each)
 docs/, Screenshots/   documentation
@@ -57,13 +57,14 @@ docs/, Screenshots/   documentation
 
 | Event | What the fleet does there |
 |---|---|
-| `session.start` | Loads the saved plan, history, worktree ledger and per-project switch; registers `/fleet`, the three lead agent types (`agent-fleet:planner`, `:reviewer`, `:designer`) and the `progress` tool; starts a one-second clock for live figures and the budget; reminds you of unmerged worktrees. |
+| `session.start` | Loads the saved plan, history, worktree ledger and per-project switch; registers `/fleet`, the five lead agent types (`agent-fleet:researcher`, `:planner`, `:reviewer`, `:designer`, `:security`) and the `progress` tool; starts a one-second clock for live figures, the budget, the memory guard (every 5 s) and the stuck-agent check (every 10 s); reminds you of unmerged worktrees. |
 | `command.run` (`fleet`) | Answers every `/fleet …` command. |
 | `prompt.submit` | For a message you typed (`origin.kind === 'composer'`) while the fleet is on: opens a *request* (id, title, run folder, cost at start) and attaches the plan as context the model reads beside your message. |
 | `prompt.compose` | Adds the plan (and, in quiet mode, the quiet-progress rule) as a section of the system prompt. |
-| `agent.spawn` | The heart of the fleet. Classifies each launch (planner, worker, reviewer, designer, other), assigns the worker's slot and model, enforces waves, worker count and the budget, appends the run-folder, progress and worktree instructions to the brief, creates the worktree, and records the run. |
+| `agent.spawn` | The heart of the fleet. Classifies each launch (researcher, planner, worker, reviewer, designer, security, other), refuses it while memory is below the limit, assigns the worker's slot and model, enforces waves, worker count and the budget, appends the run-folder, progress and worktree instructions to the brief, creates the worktree, and records the run. |
 | `tool.call` | For agents: the safe-point pause, the designer's upload guard, the worktree guard, step counting. A second hook answers the plugin's own `progress` tool. |
-| `turn.complete` | For an agent: records its result, tokens and status; for the planner, parses jobs, waves and deliverable; finishes worktrees; delivers rerun results. For the main loop: closes the request when nothing is running or paused, writes `summary.md`, records history, announces. |
+| `turn.step` | For a subagent's model request: counts every chunk of the response as a sign of life for the stuck-agent check. A pass-through generator; nothing is changed. |
+| `turn.complete` | For an agent: saves a researcher's brief (`research.md`) or a security review (`security-review.md`); records its result, tokens and status; for the planner, parses jobs, waves and deliverable; finishes worktrees; delivers rerun results. For the main loop: closes the request when nothing is running or paused, writes `summary.md`, records history, announces. |
 | `ui.render` `Pane` | Draws the fleet pane. |
 | `ui.render` `AbovePrompt` | Draws the status band. |
 | `ui.render` `UserMessage` | In compact or quiet mode, folds agents' notices and reports to one line (left alone when expanded with ctrl+o). |
@@ -76,28 +77,30 @@ All state is declared in `types/index.d.ts` and held by Claude Code, not in modu
 
 | Key | Holds | Kept across sessions in `$.store` |
 |---|---|---|
-| `plan` | slots and models, planner/reviewer/designer, auto-size, files, worktrees, budget, notify, messages, theme | yes |
+| `plan` | slots and models, researcher/planner/reviewer/designer/security, auto-size, files, worktrees, budget, memory limit and action, stuck time and action, notify, messages, theme | yes |
 | `requests` | the last few requests: title, run folder, cost, budget level, jobs and waves, deliverable, base commit | no |
 | `runs` | every agent: role, slot, job, model, status, progress, tokens, task, brief, output path, worktree | no |
 | `worktrees` | the worktree ledger | yes |
 | `history` | finished requests (last 200) | yes |
+| `memory` | the last memory reading: available, installed, when, and whether it is low | no |
 | `isProjectOff` | the per-project switch (the list of switched-off projects is in the store) | yes |
 | `peek`, `now`, `isHelpOpen`, `isHistoryOpen`, `isBandHidden` | UI state | no |
 
 A render hook reads state with `read($, atom)`, which subscribes it; any later write redraws exactly the readers. Writes use `update($, atom, fn)`, which re-applies on a version conflict, so two quick button presses both land.
 
-Two module variables exist on purpose: `slotCursor` and `reserved` (below), which only need to live within one burst of parallel launches.
+A few module variables exist on purpose: `slotCursor` and `reserved` (below), which only need to live within one burst of parallel launches; `rerunQueue`; and `beats`/`seenBeats`, the per-agent chunk counts of the stuck-agent check, which are written on every chunk and must not cost a state write each.
 
 ### 4.3 The life of a request
 
 1. **You send a message.** `prompt.submit` opens a request and writes `request.md` to a new run folder; the plan travels with your message.
-2. **Claude launches the planner.** `agent.spawn` sees `agent-fleet:planner`, gives it its own model and appends the worker slots. The planner answers with `## Deliverable: …` and `## Job N: …` sections, some marked `(after …)`.
-3. **The plan is parsed.** At the planner's `turn.complete`, `jobsOf` and `wavesOf` turn the headings into jobs and waves; `plan.md` is saved.
-4. **Claude launches the workers**, each brief starting with its `## Job N` heading. For each launch `agent.spawn`: refuses a job whose dependencies have not finished; reserves the slot (Job N → slot N); sets the model; appends the progress note, the output file path, the input files of its dependencies and, with worktrees, the worktree note — and creates the worktree.
-5. **Workers report progress** through `mcp__agent-fleet__progress`; every other tool call passes the guards and is counted.
-6. **Workers finish.** `turn.complete` records tokens and status; a worktree is committed and counted.
-7. **Claude combines, then launches the reviewer and the designer**, each on its own model, each told where the run folder is.
-8. **The main turn ends with nothing running or paused.** The request closes: `summary.md`, history, chime, banner.
+2. **Claude launches the researcher**, when it is on and the request starts something new. Its answer is saved as `research.md` and the path kept on the request.
+3. **Claude launches the planner.** `agent.spawn` sees `agent-fleet:planner`, gives it its own model and appends the worker slots and, when there is one, the research file. The planner answers with `## Deliverable: …` and `## Job N: …` sections, some marked `(after …)`.
+4. **The plan is parsed.** At the planner's `turn.complete`, `jobsOf` and `wavesOf` turn the headings into jobs and waves; `plan.md` is saved.
+5. **Claude launches the workers**, each brief starting with its `## Job N` heading. For each launch `agent.spawn`: refuses a job whose dependencies have not finished; reserves the slot (Job N → slot N); sets the model; appends the progress note, the output file path, the input files of its dependencies and, with worktrees, the worktree note — and creates the worktree.
+6. **Workers report progress** through `mcp__agent-fleet__progress`; every other tool call passes the guards and is counted.
+7. **Workers finish.** `turn.complete` records tokens and status; a worktree is committed and counted.
+8. **Claude combines, then launches the reviewer, the designer and the security reviewer**, each on its own model, each told where the run folder is; the security reviewer is also told the starting commit and the worktree branches.
+9. **The main turn ends with nothing running or paused.** The request closes: `summary.md`, history, chime, banner.
 
 ### 4.4 Assigning slots without a race
 
@@ -114,6 +117,18 @@ Claude launches parallel agents in one message, and their `agent.spawn` hooks ru
 **Budget.** Every second, `$.session.usage().cost.usd` minus the cost at the request's start gives its live cost. Level 1 (80%) and level 2 (the limit) each fire once: a toast, a transcript line (`$.ui.log`), and at the limit a note to Claude (`$.session.append`); with *stop*, the request's agents are stopped and `agent.spawn` refuses new ones until the next message. Cost arrives in steps as responses finish, hence the documented overshoot.
 
 **Pause and resume.** *Pause* only sets `pauseRequested`. The agent's next `tool.call` hook sees it, marks the run paused, stops the agent with `TaskStop`, tells Claude, and refuses the call — so the agent stops between steps and the refused call never ran. The aborted `turn.complete` keeps the run paused, and the request stays open. *Resume* calls `SendMessage` to the agent's id, which wakes it with its context; if that fails, the agent is rerun with its brief, progress and partial result.
+
+**Small requests.** `isQuickPrompt` (pure) recognises a message marked `quick:` or a short one about a git or housekeeping step with no work verb; for it `prompt.submit` opens no request and attaches `QUICK_NOTE` instead of the plan. Everything else carries `SMALL_RULE` in the plan and the reminder, which leaves the judgement to Claude. A request that ends with no agent launched is removed at the main `turn.complete` instead of being recorded.
+
+**Researcher.** A registered agent type (`Read`, `Bash`, `WebSearch`, `WebFetch`; read-only) whose prompt asks for a fixed brief: summary, what exists, a feature comparison, recommendations for the plan, sources with URLs, and what stayed unverified. At its `turn.complete` the fleet writes the answer to `research.md` and sets `researchPath` on the request; the planner's `agent.spawn` appends that path, so the hand-over does not depend on Claude remembering it. Whether a request is worth researching is left to Claude (new work yes; fixes and small edits no), so it is asked for, not enforced.
+
+**Security reviewer.** A registered read-only agent type. `prompt.submit` records `headAtStart` (`git rev-parse HEAD`) when it is on; its `agent.spawn` appends the run folder, that commit and every unmerged worktree branch of the request with the `git diff` that shows its changes. Its answer is saved as `security-review.md`. It reports and never fixes.
+
+**Memory guard.** `readMemory` runs `sysctl -n kern.memorystatus_level hw.memsize` (macOS: the kernel's percentage of memory available) and falls back to `/proc/meminfo` (Linux: `MemAvailable`); the parsers are pure functions in `lib.ts`. A reading is reused for three seconds. `agent.spawn` refuses a fleet launch below the limit. `tickMemory` acts once per episode — low is entered below the limit and left a quarter above it — by warning, by setting `pauseRequested` with `pauseReason: 'memory'` on every running agent (the safe-point pause below), or by stopping the request.
+
+**Stuck agents.** `lastActivityAt` is set by every tool call and by `tickStalls`, which folds the `turn.step` chunk counts into it every ten seconds; `busyTool` names the call an agent is inside until its next model response. `stalledFor` (pure) compares the silence with the limit, tripled for an agent inside an `Agent` call or listed as `waiting` by `$.agent.list()`. `handleStall` marks the run, alerts, and then: *restart* stops it with `TaskStop` and reruns it with its brief, the fleet's notes and `stallNote` (once per job: `stallRestarts`); *tell*, or a second stall, wakes Claude with `$.prompt.submit`. A stuck run that was stopped is *abandoned*: it holds neither its job nor its slot, so Claude can launch the job again. `tickStalls` also closes a run the engine lists as ended although no `turn.complete` reached the fleet.
+
+A plugin's own `$.agent.spawn` does not always pass its own `agent.spawn` hook (not when called from the clock), so `rerunRun` records the new run itself when the hook did not, finding its id in `$.agent.list()` by description if the call returned none, and applies the memory check the hook would have. A run keeps `notes` — what the fleet appended to its brief — and a rerun gets them again.
 
 **Peek and rerun.** Peek reads the agent's transcript with `$.session.messages({ agentId })`. Rerun launches `$.agent.spawn` with the stored brief plus a note; the `agent.spawn` hook recognises it by description and gives it the original slot, job and worktree. Its answer is handed to the conversation with `$.prompt.submit`.
 
@@ -133,7 +148,9 @@ Claude launches parallel agents in one message, and their `agent.spawn` hooks ru
 - **Guards are enforced, not requested.** Where it matters — worktree confinement, git commands, designer uploads, waves, the worker count, the budget stop — the plugin refuses the call itself instead of trusting the model to follow an instruction.
 - **Failures fail open for Claude, closed for the plugin's own actions.** If a fleet hook throws, Claude's call proceeds rather than being blocked; if a git step fails, the fleet stops and reports rather than guessing.
 - **What the model reads is not hidden.** Folding messages changes only the drawing; notes the fleet adds for Claude are explicit and prefixed `[Agent fleet]`.
-- **Honest limits.** The budget can overshoot, a pause waits for the next tool call, a pause lasts for the session, and the cost on a subscription is an API-price estimate. The README says so.
+- **The security reviewer and the researcher are read-only.** They report; they change no file. Fixing a finding is a separate step the user agrees to.
+- **The watchdog stops only what is silent.** It never stops an agent that is producing output or calling tools, restarts a job once at most, and with `warn` stops nothing.
+- **Honest limits.** The memory guard cannot stop a command that is already running short of a full stop, the budget can overshoot, a pause waits for the next tool call, a pause lasts for the session, and the cost on a subscription is an API-price estimate. The README says so.
 
 ## 7. Testing
 
@@ -150,6 +167,9 @@ To type-check, open the plugin folder from a session that has loaded it (Claude 
 
 - A pause waits for the next tool call. Waking a paused background agent by message is covered by the tests but not yet confirmed across many real runs; if it fails, the fleet falls back to a rerun and says so.
 - The budget is a tripwire that can overshoot, and measures the API-price cost.
+- The memory guard reads macOS and Linux only, and checks agents launched together against one reading. A memory pause is not resumed automatically.
+- The stuck-agent check and the `turn.step` hook are covered by the tests, but the restart of a truly hung agent has not yet been confirmed across many real runs. An agent that produces no output and calls no tool for longer than the limit while still working (rare) is treated as stuck.
+- The researcher's brief returns through the conversation before it is saved, so it is capped at about 2,500 words.
 - Agents belong to the session that started them: pauses and peeks do not survive closing the session.
 - The designer is thorough and can be the most expensive stage; choose its model accordingly.
 - The banner is macOS only. Opening a run folder uses `open` or `xdg-open`.
@@ -160,7 +180,7 @@ To type-check, open the plugin folder from a session that has loaded it (Claude 
 
 - **A new `/fleet` command:** add a branch to the `command.run` hook in `register.tsx` and a line to `HELP_LINES` in `lib.ts`. If a pane button should do the same, put the logic in a top-level function both call — a plugin cannot answer a command it runs itself.
 - **A new setting:** add a field to `FleetPlan` in `types/index.d.ts`, read it with a helper in `lib.ts`, change it with `savePlan`. It is stored across sessions automatically.
-- **A new lead role** (say, a *tester* that runs the test suite after the workers): add `TESTER_TYPE` and a prompt in `lib.ts`; register the agent type in `session.start`; add the role to `FleetRole`, `phaseOf`, `requestPercent`, `roleLabel` and `ROLE_COLOR`; give it a branch in `agent.spawn` for its model and notes; add a step to `planText`/`promptReminder`; add a pane row and a command branch.
+- **A new lead role** (say, a *tester* that runs the test suite after the workers): add `TESTER_TYPE` and a prompt in `lib.ts`; register the agent type in `session.start`; add its key to `FleetLeadKey`, `LEAD_KEYS`, `LEAD_NAME`, `LEAD_TYPE` and `leadOf` (the command and the pane's toggles then work), and the role to `FleetRole`, `phaseOf`, `requestPercent`, `roleLabel` and `ROLE_COLOR`; give it a branch in `agent.spawn` for its model and notes; add a step to `planText`/`promptReminder`; add a pane row and a command branch.
 - **A new guard:** write a pure function in `lib.ts` returning a refusal reason or `null`, and call it in the agent `tool.call` hook.
 - **A new deliverable type:** add it to the planner prompt's `## Deliverable` line and describe what the designer should produce for it in `DESIGNER_PROMPT`.
 - **Always:** add tests, run `claude plugin validate .` and `claude plugin test .`, bump the version in `plugin.json` and `VERSION` in `lib.ts`.

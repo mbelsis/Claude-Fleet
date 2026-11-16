@@ -1,14 +1,17 @@
 # Agent fleet for Claude Code
 
-A Claude Code plugin that splits each task you give Claude across a fleet of subagents you configure — a lead planner, workers on the models you choose, a reviewer and a designer — and shows you what every one of them is doing.
+A Claude Code plugin that splits each task you give Claude across a fleet of subagents you configure — a market researcher, a lead planner, workers on the models you choose, a reviewer, a designer and a security reviewer — and shows you what every one of them is doing.
 
-Version 0.7.0 · © 2026 Belsis Meletis · free to use, see [Licence and disclaimer](#licence-and-disclaimer). This is a test plugin: try it on work you can afford to redo.
+Version 0.8.0 · © 2026 Belsis Meletis · free to use, see [Licence and disclaimer](#licence-and-disclaimer). This is a test plugin: try it on work you can afford to redo.
 
 ## How a request flows
 
 ```
 you type a task
    │
+   ▼
+Researcher ─ searches the web for what already exists: competitors,     (optional)
+   │         alternatives, their features, books, decks, videos, news
    ▼
 Planner ──── thinks it through, names the deliverable, writes one brief per worker,
    │         marks which jobs need others first ("## Job 3 … (after 1, 2)")
@@ -21,10 +24,13 @@ Claude ───── combines the results
 Reviewer ─── checks facts and consistency, corrects the draft          (optional)
    ▼
 Designer ─── turns it into finished files: .docx/.pdf, .pptx, a better (optional)
-             web page, charts — on your laptop only
+   │         web page, charts — on your laptop only
+   ▼
+Security ─── reviews the code, configuration and AI agents that were    (optional)
+             built, and reports findings; changes nothing
 ```
 
-Every stage is optional except the workers, and each lead agent (planner, reviewer, designer) has its own model.
+Every stage is optional except the workers, and each lead agent (researcher, planner, reviewer, designer, security reviewer) has its own model.
 
 ## Screenshots
 
@@ -54,6 +60,8 @@ What the designer produced — a two-page practitioner guide, built on the lapto
 
 - **Worker slots:** how many subagents a task uses (1–10) and which model each runs on: `/fleet 4 sonnet sonnet opus inherit`. Agents launched together always get distinct slots, so slot N's model is really used for one of them.
 - **Lead planner** (on by default): thinks the task through, names the deliverable (report, slides, website, code or data) and writes one self-contained brief per worker. A job can depend on others — `## Job 3: UI (after 1, 2)` — and the fleet runs such jobs in **waves**, refusing to start one before the jobs it needs have finished and handing it their result files.
+- **Market researcher** (off by default, `/fleet researcher on`): runs before the planner when the request starts something new — a project, a product, a feature, a book, a piece of research, a presentation. It searches the web thoroughly and opens the pages that matter: competing products and alternatives with their features, pricing and what users say; for a book or paper, existing books, papers, PDFs and reports; for a presentation, published decks, talks, videos and news. It returns a research brief — what exists, a feature comparison (what everyone has, what only some have, what nobody does well), recommendations for the plan, and every source with its URL — saved as `research.md` in the run folder. The fleet names that file in the planner's prompt, so the plan is built on it. It is skipped for bug fixes, refactors and small edits. It runs on sonnet unless you choose another model.
+- **Security reviewer** (off by default, `/fleet security on`): the last step, when the request created or changed code, configuration, infrastructure or an AI agent. It finds the changes with git (the fleet tells it the commit the project started from, and any worktree branches), reads the files, and checks injection, authentication and authorisation, secrets, input handling, cryptography, new dependencies and configuration — and, for AI agents, prompt injection, over-broad tools and permissions, actions without human approval, data sent to models or third parties, and unchecked model output. It reports a verdict and findings by severity with file, line, how it goes wrong and the fix, saved as `security-review.md`. It is read-only and fixes nothing; Claude asks you before fixing.
 - **Automatic sizing** (`/fleet auto on`): the planner chooses between 1 and N workers per task instead of always N.
 - **Reviewer** (off by default): checks the combined draft against the workers' "unverified or conflicting" notes and corrects it.
 - **Designer** (off by default): turns the reviewed result into finished files by deliverable type — an improved Markdown copy plus `.docx` and `.pdf` for a report; a `.pptx` for slides (one message per slide, charts for numbers, speaker notes); browser-checked fixes to layout, spacing, contrast and accessibility for a web page; charts for data. It writes into the run folder's `design/` with a `CHANGES.md`, never adds facts, never overwrites the original, and **uploads nothing**: tools that would publish or send work off the laptop are refused for it. It is also the most thorough stage, so it can be the most expensive; `/fleet designer sonnet` keeps it cheaper.
@@ -72,6 +80,9 @@ What the designer produced — a two-page practitioner guide, built on the lapto
 - **Finish notification:** a request of 30 seconds or longer ends with a chime (rising when finished, falling when stopped) and, on macOS, a system banner. `/fleet notify on | off | sound | banner`.
 - **History:** finished requests are kept across sessions; `/fleet history` (this project) or `/fleet history all`, and a *history* section in the pane with an *open* button for each run folder.
 - **Budget** — see [Budget](#budget).
+- **Memory guard** — see [Memory guard](#memory-guard).
+- **Stuck agents** — see [Stuck agents](#stuck-agents).
+- **Small requests stay direct** — see [Small requests](#small-requests).
 - **Per project:** `/fleet use off` switches the fleet off in one project only.
 - **Colours:** seven schemes for the pane (`b` or `/fleet theme`), navy by default.
 
@@ -106,6 +117,34 @@ Press **ctrl+o** to read any folded row in full. Only what you see changes: Clau
 - It warns at 80% and at the limit, with a toast and a line that stays in the transcript. With **stop**, it stops the request's agents, refuses any further agent until your next message, and tells Claude why.
 - **It is a tripwire, not a hard cap.** Cost is counted only when a model response finishes, and responses already running when the stop happens still complete, so a request with several agents can end noticeably above the limit (in testing, $1.32 against $0.50). Set it below what you can tolerate.
 - On a subscription such as Claude Max the figure is what the usage would cost at API prices, not what you are billed.
+
+## Small requests
+
+"commit please" or "push to git" should take seconds, not a planner and three workers. With `/fleet quick on` (the default) the fleet stays out of small requests:
+
+- **Recognised at once:** a short message (12 words at most) about a git or housekeeping step — commit, push, pull, open a pull request, tag, status, diff — that asks for no real work. For these the fleet opens no request at all: no planner, no band, no run folder. Claude is told to do it directly.
+- **Your own marker:** start any message with `quick:` (or `direct:`) and it is treated the same way, whatever it says: `quick: rename the helper in utils.ts`.
+- **Claude's judgement for the rest:** the plan itself now tells Claude that small requests — one command, an edit to a line or two, a follow-up question, anything it can finish in a few tool calls — are done directly, and the fleet is for work that really divides.
+- A request Claude answers without any agent leaves no entry in the history and is not announced.
+- `/fleet quick off` sends every request to the fleet again, however small. A message such as "write a commit hook" or "fix the merge conflicts" is real work and still goes to the fleet.
+
+## Memory guard
+
+Agents start builds, test runs, browsers and servers, and several at once can use all the memory a laptop has. The guard keeps a reserve.
+
+- **Before an agent starts**, the fleet reads the memory still available. Below the limit it refuses to start the agent and tells Claude to wait for a running one to finish.
+- **While agents run**, it reads memory every five seconds. When it falls below the limit it alerts you (toast, transcript line, sound, banner) and, as you chose with `/fleet memory warn | pause | stop`: only warns; **pauses** every running agent at its next tool call (the default); or stops the request. Paused agents are resumed by you (`/fleet resume`, or `x` in the pane) once memory is free — the fleet does not resume them itself.
+- **The limit** is a tenth of the installed memory (1 GB at least) unless you set one: `/fleet memory 4g`, `/fleet memory 4096m`. `/fleet memory` shows the current reading; `/fleet memory off` removes the guard.
+- **What is measured:** on macOS the kernel's own figure for available memory (the percentage `memory_pressure` prints); on Linux `MemAvailable`. On other systems the guard does nothing and says so.
+- **It is a guard, not a cap.** A pause takes effect at the agent's next tool call, so a command that is already eating memory runs to its end; `stop` ends it at once. Agents launched together are all checked against the same reading. Set the limit with room to spare.
+
+## Stuck agents
+
+An agent can hang — on a command that waits for input, a server started in the foreground, a model response that never finishes — while Claude goes on waiting for it. The fleet watches for that.
+
+- **What counts as activity:** every piece of a model response arriving, and every tool call. An agent with none for 15 minutes counts as stuck (`/fleet stuck 20` changes it; `/fleet stuck off` turns the check off). An agent waiting on its own subagents or background work gets three times as long.
+- **What happens** (`/fleet stuck warn | tell | restart`): the row is marked *STUCK?* and you are alerted. With **restart** (the default) the fleet stops the agent and starts its job again once, with the same brief, how far it had got, its partial result file and a note on what hung; the new result is handed to Claude when it arrives. If the job gets stuck a second time, or with **tell**, Claude is woken with a message to check the agent, stop it, and relaunch the job or take over its work — the fleet allows a stuck job to be launched again. With **warn** nothing else is done.
+- **Agents that ended without saying so:** if Claude Code lists an agent as finished, failed or stopped while the fleet still shows it running, the fleet corrects its row after a minute, so a request is not held open by it.
 
 ## Worktrees: how parallel code changes come back together
 
@@ -159,6 +198,8 @@ The plan starts **off**. A sensible start:
 ```
 /fleet 3 sonnet sonnet opus     # three workers and their models (also turns the plan on)
 /fleet planner opus             # lead planner on the newest Opus
+/fleet researcher on            # research what exists before planning new work
+/fleet security on              # security review of code the agents wrote
 /fleet reviewer on              # check facts before you see the result
 /fleet budget 5                 # warn when a request passes $5
 /fleet messages compact         # fold the agents' messages
@@ -181,6 +222,8 @@ Uninstalling leaves your run folders (`~/.claude/fleet-runs/`) and any fleet wor
 
 - **`/fleet` is not recognised:** the plugin is not loaded. Run `claude plugin list`; if it is missing, repeat the install; if it is listed, start a new session. `claude --debug` shows why a plugin did not load.
 - **The pane text is hard to read:** your Claude Code theme and terminal background disagree. Run `/theme` and pick the matching one, or change the pane with `/fleet theme`.
+- **"only … of memory is available":** the memory guard refused to start an agent. Close what you do not need, or change the limit with `/fleet memory`.
+- **An agent is marked *STUCK?* but is working:** raise the time with `/fleet stuck 30`, or use `/fleet stuck warn` so nothing is stopped.
 - **"could not create a worktree":** the project is not a git repository, or git refused. Turn worktrees off with `/fleet worktrees off`, or fix the repository.
 - **A paused agent says it was "stopped":** that is how Claude Code lists a paused agent; `/fleet resume` wakes it.
 
@@ -195,6 +238,13 @@ Uninstalling leaves your run folders (`~/.claude/fleet-runs/`) and any fleet wor
 /fleet planner on|off|M    lead planner, and its model (opus, fable, sonnet, inherit)
 /fleet reviewer on|off|M   reviewer that checks the combined result last
 /fleet designer on|off|M   designer that polishes the result into files (uploads nothing)
+/fleet researcher on|off|M market research on the web before the planner plans
+/fleet security on|off|M   security review of what was built, as the last step (read-only)
+/fleet memory N | off      memory to keep available (4g, 4096m): below it no agent starts
+/fleet memory warn|pause|stop   what happens to running agents when memory runs low
+/fleet stuck N | off       minutes without activity before an agent counts as stuck
+/fleet stuck warn|tell|restart  only warn you, hand it to Claude, or restart it once
+/fleet quick on|off        small requests (commit, push, one command) skip the fleet
 /fleet auto on|off         let the planner choose 1–N workers per task
 /fleet files on|off        workers write results to files in a run folder
 /fleet budget N | off      spending limit per request, in US dollars
@@ -213,7 +263,7 @@ Uninstalling leaves your run folders (`~/.claude/fleet-runs/`) and any fleet wor
 /fleet help                show this list
 ```
 
-Pane keys: `t` plan · `u` this project · `p`/`o` planner · `r`/`e` reviewer · `d`/`n` designer · `f`/`m` fewer/more workers · `a` count · `1–9` agent model · `l` files · `w` worktrees · `v` messages · `b` colours · `x` pause or resume all · `s` stop all · `c` clear · `y` history · `g` merge · `h` help.
+Pane keys: `t` plan · `u` this project · `i`/`j` researcher · `p`/`o` planner · `r`/`e` reviewer · `d`/`n` designer · `k`/`z` security · `f`/`m` fewer/more workers · `a` count · `1–9` agent model · `l` files · `w` worktrees · `v` messages · `b` colours · `x` pause or resume all · `s` stop all · `c` clear · `y` history · `g` merge · `h` help.
 
 ## Develop
 

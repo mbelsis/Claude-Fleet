@@ -4,6 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import type {
   FleetHistoryEntry,
   FleetLead,
+  FleetLeadKey,
+  FleetMemory,
   FleetPeek,
   FleetPlan,
   FleetRequest,
@@ -74,6 +76,29 @@ import {
   wavesOf,
   worktreeGuard,
   worktreeNote,
+  isAbandoned,
+  isQuickDirectOn,
+  isQuickPrompt,
+  QUICK_NOTE,
+  isLeadKey,
+  isMemoryLow,
+  LEAD_NAME,
+  leadOf,
+  leadOfType,
+  memoryFromMeminfo,
+  memoryFromSysctl,
+  memoryLimitMb,
+  memText,
+  parseMemory,
+  RESEARCHER_PROMPT,
+  researcherOf,
+  SECURITY_PROMPT,
+  securityOf,
+  stallActionOf,
+  stalledFor,
+  stallMinutesOf,
+  stallNote,
+  stallPlace,
 } from './lib'
 import type { Phase } from './lib'
 
@@ -102,6 +127,12 @@ const worktrees = atom({ plugin: 'agent-fleet', key: 'worktrees' } as const, [])
 const peek = atom({ plugin: 'agent-fleet', key: 'peek' } as const, null)
 const history = atom({ plugin: 'agent-fleet', key: 'history' } as const, [])
 const isHistoryOpen = atom({ plugin: 'agent-fleet', key: 'isHistoryOpen' } as const, false)
+const memory = atom({ plugin: 'agent-fleet', key: 'memory' } as const, null)
+/** How often memory is measured and stuck agents are looked for, in clock ticks (seconds). */
+const MEMORY_EVERY = 5
+const STALL_EVERY = 10
+/** A memory reading younger than this is used again instead of measuring. */
+const MEMORY_FRESH_MS = 3_000
 /** Finished requests kept across sessions. */
 const KEPT_HISTORY = 200
 /** Requests shorter than this finish without a sound or banner. */
@@ -117,6 +148,8 @@ const STATUS_COLOR = {
   stopped: 'warning',
 } as const
 const PHASE_LABEL: Record<Phase, string> = {
+  researching: 'Researching',
+  securing: 'Security review',
   planning: 'Planning',
   working: 'Workers running',
   paused: 'Paused',
@@ -145,11 +178,15 @@ const roleLabel = (run: FleetRun): string =>
       ? 'reviewer'
       : run.role === 'designer'
         ? 'designer'
-        : run.job != null
-          ? `job ${run.job}`
-          : run.slot !== null
-            ? `agent ${run.slot + 1}`
-            : 'agent'
+        : run.role === 'researcher'
+          ? 'research'
+          : run.role === 'security'
+            ? 'security'
+            : run.job != null
+              ? `job ${run.job}`
+              : run.slot !== null
+                ? `agent ${run.slot + 1}`
+                : 'agent'
 
 async function refreshStatus($: EngineInterface): Promise<void> {
   const list = await read($, runs)
@@ -213,7 +250,11 @@ async function setWorktree($: EngineInterface, id: string, change: Partial<Fleet
 }
 
 /** Stops one running agent through the TaskStop tool, as the person's own action. */
-async function stopRun($: EngineInterface, run: FleetRun): Promise<void> {
+async function stopRun(
+  $: EngineInterface,
+  run: FleetRun,
+  consent = `The user pressed "Stop" for the fleet agent "${run.description}".`,
+): Promise<void> {
   if (run.status === 'paused') {
     // Already stopped at a safe point: it only stops being resumable.
     const at = await $.clock.now()
@@ -228,7 +269,7 @@ async function stopRun($: EngineInterface, run: FleetRun): Promise<void> {
   const answer = await $.tool.call({
     tool: 'TaskStop',
     task_id: run.id,
-    consent: `The user pressed "Stop" for the fleet agent "${run.description}".`,
+    consent,
   })
   if (answer.deny !== undefined) {
     $.ui.toast(`Could not stop "${run.description}": ${answer.deny}`)
@@ -243,6 +284,30 @@ async function stopRun($: EngineInterface, run: FleetRun): Promise<void> {
     ),
   )
   await refreshStatus($)
+}
+
+/** A system banner, which reaches the person when the terminal is in the background (macOS only;
+ * elsewhere the command is missing and nothing happens). */
+async function banner($: EngineInterface, title: string, text: string): Promise<void> {
+  const quote = (one: string) => one.replace(/[\\"]/g, '').slice(0, 180)
+  const script = `display notification "${quote(text)}" with title "${quote(title)}"`
+  await $.process.run(['osascript', '-e', script], { timeoutMs: 5_000 }).catch(() => undefined)
+}
+
+/**
+ * Something the person should know now, even away from the terminal: a toast, a line that stays
+ * in the transcript, and the alert sound and banner their notify setting allows.
+ */
+async function alertUser($: EngineInterface, title: string, line: string): Promise<void> {
+  $.ui.toast(line)
+  $.ui.log(line)
+  const mode = (await read($, plan)).notify ?? 'all'
+  if (mode === 'all' || mode === 'sound') {
+    await $.audio.play({ asset: 'fx/alert.wav' }).catch(() => undefined)
+  }
+  if (mode === 'all' || mode === 'banner') {
+    await banner($, title, line.replace(/^Agent fleet: /, ''))
+  }
 }
 
 /** Announces a finished request: a transcript line always, then a sound and a banner. */
@@ -260,12 +325,8 @@ async function announce($: EngineInterface, entry: FleetHistoryEntry): Promise<v
     await $.audio.play({ asset }).catch(() => undefined)
   }
   if (mode === 'all' || mode === 'banner') {
-    // A system banner reaches the person when the terminal is in the background (macOS only;
-    // elsewhere the command is missing and nothing happens).
-    const quote = (text: string) => text.replace(/[\\"]/g, '').slice(0, 180)
     const title = entry.outcome === 'done' ? 'Agent fleet: finished' : 'Agent fleet: stopped'
-    const script = `display notification "${quote(line.replace(/^Agent fleet: /, ''))}" with title "${title}"`
-    await $.process.run(['osascript', '-e', script], { timeoutMs: 5_000 }).catch(() => undefined)
+    await banner($, title, line.replace(/^Agent fleet: /, ''))
   }
 }
 
@@ -335,12 +396,20 @@ async function tellMain($: EngineInterface, text: string): Promise<void> {
  * Asks a running agent to pause. Nothing is cut off mid-step: the fleet waits for the agent's
  * next tool call, refuses that call, and stops the agent there (see the tool.call hook).
  */
-async function pauseRun($: EngineInterface, run: FleetRun): Promise<void> {
+async function pauseRun(
+  $: EngineInterface,
+  run: FleetRun,
+  reason: 'memory' | null = null,
+): Promise<void> {
   if (run.status !== 'running') return
   await update($, runs, list =>
-    list.map(one => (one.id === run.id ? { ...one, pauseRequested: true } : one)),
+    list.map(one =>
+      one.id === run.id ? { ...one, pauseRequested: true, pauseReason: reason } : one,
+    ),
   )
-  $.ui.toast(`Agent fleet: "${run.description}" will pause at its next tool call.`)
+  if (reason === null) {
+    $.ui.toast(`Agent fleet: "${run.description}" will pause at its next tool call.`)
+  }
 }
 
 /** Wakes a paused agent with a message; it carries on with everything it had done. */
@@ -350,6 +419,7 @@ async function resumeRun(
   queue: Map<string, FleetRun>,
 ): Promise<void> {
   if (run.status !== 'paused') return
+  const at = await $.clock.now()
   const answer = await $.tool
     .call({
       tool: 'SendMessage',
@@ -379,7 +449,17 @@ async function resumeRun(
   }
   await update($, runs, list =>
     list.map(one =>
-      one.id === run.id ? { ...one, status: 'running' as const, endedAt: null } : one,
+      one.id === run.id
+        ? {
+            ...one,
+            status: 'running' as const,
+            endedAt: null,
+            pauseReason: null,
+            stalledAt: null,
+            busyTool: null,
+            lastActivityAt: at,
+          }
+        : one,
     ),
   )
   await tellMain($, `The user resumed "${run.description}". Wait for its result as before.`)
@@ -678,27 +758,81 @@ async function peekRun($: EngineInterface, run: FleetRun): Promise<FleetPeek> {
   return { runId: run.id, text: text.slice(0, 900), tool: toolText, at }
 }
 
-/** Starts a finished agent again with the same brief and the person's note. */
+/** The record of an agent that repeats `run`: same role, slot, job, brief and worktree. */
+function rerunRecord(
+  run: FleetRun,
+  id: string,
+  description: string,
+  model: string,
+  at: number,
+): FleetRun {
+  return {
+    id,
+    description,
+    type: run.type,
+    model,
+    slot: run.slot,
+    status: 'running',
+    startedAt: at,
+    lastActivityAt: at,
+    busyTool: null,
+    stalledAt: null,
+    stallRestarts: (run.stallRestarts ?? 0) + (run.stalledAt != null ? 1 : 0),
+    endedAt: null,
+    tools: 0,
+    lastTool: null,
+    tokens: null,
+    steps: NO_STEPS,
+    role: run.role ?? 'worker',
+    requestId: run.requestId ?? null,
+    progress: null,
+    task: run.task ?? taskOf(run.prompt ?? ''),
+    prompt: run.prompt,
+    notes: run.notes ?? '',
+    job: run.job ?? null,
+    outputPath: run.outputPath ?? null,
+    worktreeId: run.worktreeId ?? null,
+    rerunOf: run.id,
+  }
+}
+
+/** The description a rerun of this agent is launched under, which its spawn is recognised by. */
+const rerunDescription = (run: FleetRun): string =>
+  `${run.description.replace(/ \(rerun\)$/, '')} (rerun)`
+
+/**
+ * Starts a finished agent again with the same brief and the person's note. Resolves to whether
+ * the new agent started.
+ */
 async function rerunRun(
   $: EngineInterface,
   run: FleetRun,
   note: string,
   queue: Map<string, FleetRun>,
-): Promise<void> {
+): Promise<boolean> {
   if (!run.prompt) {
     $.ui.toast(
       'Agent fleet: this agent started before reruns were possible; its brief was not kept.',
     )
-    return
+    return false
   }
-  const description = `${run.description.replace(/ \(rerun\)$/, '')} (rerun)`
+  const description = rerunDescription(run)
+  // The spawn hook does not run for an agent the fleet starts from its own clock, so what the
+  // hook would have refused is checked here too.
+  const short = await memoryRefusal($, await read($, plan)).catch(() => null)
+  if (short !== null) {
+    $.ui.toast(`Agent fleet: "${run.description}" was not started again: memory is low.`)
+    return false
+  }
   queue.set(description, run)
   const wt = run.worktreeId
     ? (await read($, worktrees)).find(one => one.id === run.worktreeId)
     : undefined
   const extra = note.trim() ? `\n\nNote from the user for this rerun: ${note.trim()}` : ''
   const started = await $.agent.spawn({
-    prompt: run.prompt + extra,
+    // The brief as its caller wrote it, then the fleet's own notes (where to write the result,
+    // the worktree, the slots), which the first launch added and this one must not lose.
+    prompt: run.prompt + (run.notes ?? '') + extra,
     description,
     subagentType: run.type,
     model: run.model,
@@ -707,7 +841,26 @@ async function rerunRun(
   if (started.deny !== undefined) {
     queue.delete(description)
     $.ui.toast(`Agent fleet: rerun refused: ${started.deny}`)
+    return false
   }
+  // The spawn hook does not see every launch the fleet makes itself, and a launch may answer
+  // without its id: the new agent is then found in the engine's list by its description.
+  const known = await read($, runs)
+  let agentId = started.agentId
+  if (agentId === undefined) {
+    const listed = await $.agent.list().catch(() => null)
+    agentId = (Array.isArray(listed) ? listed : []).findLast(
+      one => one.description === description && !known.some(seen => seen.id === one.id),
+    )?.id
+  }
+  if (agentId !== undefined && !known.some(one => one.id === agentId)) {
+    queue.delete(description)
+    const at = await $.clock.now()
+    const record = rerunRecord(run, agentId, description, started.model ?? run.model, at)
+    await update($, runs, items => [...items, record].slice(-KEPT_RUNS))
+    await refreshStatus($)
+  }
+  return true
 }
 
 /** Keeps a request's live cost and acts on its budget. */
@@ -765,6 +918,263 @@ async function tickBudget($: EngineInterface): Promise<void> {
   if (isStop) await stopRequest($, request)
 }
 
+/**
+ * Measures the memory the laptop still has available: on macOS the kernel's own figure, on
+ * Linux MemAvailable. Null where neither can be read; the guard then does nothing.
+ */
+async function readMemory($: EngineInterface): Promise<FleetMemory | null> {
+  const at = await $.clock.now()
+  const known = await read($, memory)
+  if (known !== null && at >= known.at && at - known.at < MEMORY_FRESH_MS) return known
+  const run = (argv: string[]) => $.process.run(argv, { timeoutMs: 5_000 }).catch(() => null)
+  const mac = await run(['sysctl', '-n', 'kern.memorystatus_level', 'hw.memsize'])
+  let found = mac !== null && mac.exitCode === 0 ? memoryFromSysctl(mac.stdout) : null
+  if (found === null) {
+    const linux = await run(['cat', '/proc/meminfo'])
+    found = linux !== null && linux.exitCode === 0 ? memoryFromMeminfo(linux.stdout) : null
+  }
+  if (found === null) return null
+  const limit = memoryLimitMb(await read($, plan), found.totalMb)
+  const fresh: FleetMemory = {
+    ...found,
+    at,
+    isLow: limit !== null && isMemoryLow(found.availMb, limit, known?.isLow ?? false),
+  }
+  await update($, memory, () => fresh)
+  return fresh
+}
+
+/** Why no agent may start now for lack of memory, or null when one may. */
+async function memoryRefusal($: EngineInterface, fleet: FleetPlan): Promise<string | null> {
+  if (fleet.memMinFreeMb === null) return null
+  const mem = await readMemory($)
+  if (mem === null) return null
+  const limit = memoryLimitMb(fleet, mem.totalMb)
+  if (limit === null || mem.availMb >= limit) return null
+  return (
+    `Agent fleet: only ${memText(mem.availMb)} of memory is available and the user's limit is ` +
+    `${memText(limit)}, so no further agent starts now. If agents of this request are still ` +
+    'running, wait for one to finish and then launch this one again, once. If none is running, ' +
+    'stop and tell the user that memory is too low to continue; they can free memory or change ' +
+    'the limit with /fleet memory.'
+  )
+}
+
+/**
+ * Watches memory while agents run. When it falls below the limit, once per episode: warns,
+ * pauses every running agent at its next tool call, or stops the request, as the person chose.
+ */
+async function tickMemory($: EngineInterface): Promise<void> {
+  const fleet = await read($, plan)
+  if (fleet.memMinFreeMb === null) return
+  const list = await read($, runs)
+  const running = list.filter(run => run.status === 'running')
+  // Agents paused for memory keep the reading fresh, so the pane shows when it has recovered.
+  if (running.length === 0 && !list.some(run => run.status === 'paused')) return
+  const before = (await read($, memory))?.isLow ?? false
+  const mem = await readMemory($)
+  if (mem === null || !mem.isLow || before || running.length === 0) return
+  const limit = memoryLimitMb(fleet, mem.totalMb) ?? 0
+  const action = fleet.memAction ?? 'pause'
+  const low = `only ${memText(mem.availMb)} of memory is available (limit ${memText(limit)})`
+  if (action === 'warn') {
+    await alertUser($, 'Agent fleet: memory is low', `Agent fleet: ${low}. Agents keep running.`)
+    return
+  }
+  if (action === 'stop') {
+    await alertUser(
+      $,
+      'Agent fleet: memory is low',
+      `Agent fleet: ${low}; the agents were stopped.`,
+    )
+    await tellMain(
+      $,
+      `Memory on the user's laptop ran low (${low}), so the fleet stopped its agents. Do not ` +
+        'relaunch them and do not do their work now; tell the user, who can free memory and ask again.',
+    )
+    const open = await openRequest($)
+    if (open !== undefined) await stopRequest($, open)
+    for (const run of (await read($, runs)).filter(one => one.status === 'running')) {
+      await stopRun(
+        $,
+        run,
+        'The user set /fleet memory stop: agents are stopped when memory runs low.',
+      )
+    }
+    return
+  }
+  await alertUser(
+    $,
+    'Agent fleet: memory is low',
+    `Agent fleet: ${low}; ${running.length} agent(s) pause at their next tool call. Free ` +
+      'memory, then /fleet resume.',
+  )
+  await tellMain(
+    $,
+    `Memory on the user's laptop ran low (${low}), so the fleet is pausing its agents at their ` +
+      'next tool call. Do not relaunch them, do not do their work yourself and do not finish the ' +
+      'request without them: the user resumes them once memory is free.',
+  )
+  for (const run of running) await pauseRun($, run, 'memory')
+}
+
+/**
+ * Acts on one agent that has stopped moving: marks it, alerts the person, and then, as they
+ * chose, leaves it (warn), wakes Claude to deal with it (tell), or stops it and starts its job
+ * again once (restart). A job that gets stuck a second time is handed to Claude.
+ */
+async function handleStall(
+  $: EngineInterface,
+  run: FleetRun,
+  quietMs: number,
+  queue: Map<string, FleetRun>,
+): Promise<void> {
+  const at = await $.clock.now()
+  const fleet = await read($, plan)
+  const minutes = Math.max(1, Math.round(quietMs / 60_000))
+  const place = stallPlace(run)
+  const stalled: FleetRun = { ...run, stalledAt: at }
+  await update($, runs, list =>
+    list.map(one => (one.id === run.id ? { ...one, stalledAt: at } : one)),
+  )
+  const action = stallActionOf(fleet)
+  const head = `Agent fleet: "${run.description}" has shown no activity for ${minutes} minutes (${place}); it looks stuck.`
+  if (action === 'warn') {
+    await alertUser(
+      $,
+      'Agent fleet: an agent looks stuck',
+      `${head} Peek at it, or stop it, in /fleet.`,
+    )
+    return
+  }
+  if (action === 'restart' && (run.stallRestarts ?? 0) < 1 && run.prompt) {
+    await tellMain(
+      $,
+      `"${run.description}" showed no activity for ${minutes} minutes (${place}), so the fleet ` +
+        'is stopping it and starting its job again with the same brief. Do not relaunch it and ' +
+        'do not do its job yourself: the new result will arrive as a message. Carry on with ' +
+        'anything that does not depend on it.',
+    )
+    // Queued before the stop, so the stopped agent's worktree is kept for the one that follows.
+    queue.set(rerunDescription(run), stalled)
+    await stopRun(
+      $,
+      run,
+      `The user set /fleet stuck restart: "${run.description}" showed no activity for ${minutes} minutes.`,
+    )
+    const stopped = (await read($, runs)).find(one => one.id === run.id)
+    const isRestarted =
+      stopped !== undefined &&
+      stopped.status !== 'running' &&
+      (await rerunRun($, stalled, stallNote(run, minutes), queue))
+    if (isRestarted) {
+      await alertUser(
+        $,
+        'Agent fleet: restarted a stuck agent',
+        `${head} It was stopped and started again.`,
+      )
+      return
+    }
+    queue.delete(rerunDescription(run))
+    await tellMain(
+      $,
+      `The fleet could not restart "${run.description}" after all; the next message says what to do.`,
+    )
+  }
+  // Hand it to Claude, which is otherwise still waiting for a result that may never come.
+  await alertUser(
+    $,
+    'Agent fleet: an agent looks stuck',
+    `${head} Claude was asked to deal with it.`,
+  )
+  const again = (run.stallRestarts ?? 0) > 0 ? ' The fleet already restarted this job once.' : ''
+  const file = run.outputPath ? ` Its result file, if it wrote one, is ${run.outputPath}.` : ''
+  await $.prompt
+    .submit({
+      text:
+        `[Agent fleet] The agent "${run.description}" (task id ${run.id}) has shown no activity ` +
+        `for ${minutes} minutes, ${place}, and is probably stuck.${again}${file} Do not keep ` +
+        'waiting for it. Check it now. If it is stuck, stop it with TaskStop and then either ' +
+        'launch its job again with the same brief (the fleet allows that for a stuck agent) or ' +
+        'do the rest of its work yourself, and say which you did. If it is still working, leave ' +
+        'it and tell the user what it is doing.',
+    })
+    .catch(() => undefined)
+}
+
+/**
+ * Looks for agents that have stopped moving. Activity is a model response arriving (counted in
+ * `beats` by the turn.step hook) or a tool call. An agent the engine lists as ended, though its
+ * end never reached the fleet, is closed here so nothing waits for it.
+ */
+async function tickStalls(
+  $: EngineInterface,
+  beats: Map<string, number>,
+  seen: Map<string, number>,
+  queue: Map<string, FleetRun>,
+): Promise<void> {
+  const at = await $.clock.now()
+  const running = (await read($, runs)).filter(run => run.status === 'running')
+  const moved = new Set(
+    running.filter(run => beats.get(run.id) !== seen.get(run.id)).map(r => r.id),
+  )
+  for (const id of moved) seen.set(id, beats.get(id) ?? 0)
+  for (const id of [...beats.keys()]) {
+    if (!running.some(run => run.id === id)) {
+      beats.delete(id)
+      seen.delete(id)
+    }
+  }
+  if (moved.size > 0) {
+    await update($, runs, list =>
+      list.map(one =>
+        moved.has(one.id) && one.status === 'running'
+          ? { ...one, lastActivityAt: at, busyTool: null, stalledAt: null }
+          : one,
+      ),
+    )
+  }
+  const minutes = stallMinutesOf(await read($, plan))
+  if (minutes === null || running.length === 0) return
+  const listed = await $.agent.list().catch(() => null)
+  const infos = Array.isArray(listed) ? listed : []
+  for (const run of (await read($, runs)).filter(one => one.status === 'running')) {
+    const info = infos.find(one => one.id === run.id)
+    const quiet = at - (run.lastActivityAt ?? run.startedAt)
+    const ended =
+      info?.status === 'completed'
+        ? ('done' as const)
+        : info?.status === 'failed'
+          ? ('failed' as const)
+          : info?.status === 'killed'
+            ? ('stopped' as const)
+            : null
+    if (ended !== null) {
+      // Its end should have arrived as turn.complete; a minute later it clearly has not.
+      if (quiet < 60_000) continue
+      await update($, runs, list =>
+        list.map(one =>
+          one.id === run.id && one.status === 'running'
+            ? { ...one, status: ended, endedAt: at, busyTool: null }
+            : one,
+        ),
+      )
+      $.ui.log(
+        `Agent fleet: "${run.description}" had already ended (${info?.status}) without reporting; it is now shown as ${ended}.`,
+      )
+      const wt = run.worktreeId
+        ? (await read($, worktrees)).find(one => one.id === run.worktreeId)
+        : undefined
+      if (wt && wt.status === 'active') await finishWorktree($, wt)
+      await refreshStatus($)
+      continue
+    }
+    if (run.stalledAt != null) continue
+    const stalledMs = stalledFor(run, at, minutes, info?.status === 'waiting')
+    if (stalledMs !== null) await handleStall($, run, stalledMs, queue)
+  }
+}
+
 export const register: Register = on => {
   // Slots the main loop has handed out since the person's last prompt, when no job is named.
   let slotCursor = 0
@@ -774,6 +1184,10 @@ export const register: Register = on => {
   const reserved = new Map<string, Set<number>>()
   // Reruns waiting for their agent.spawn, by description.
   const rerunQueue = new Map<string, FleetRun>()
+  // Chunks of model output seen per agent, and the count the watchdog last looked at: a
+  // response still arriving is activity, however long it takes.
+  const beats = new Map<string, number>()
+  const seenBeats = new Map<string, number>()
   let ticks = 0
 
   on('session.start', async ($, e, next) => {
@@ -826,6 +1240,26 @@ export const register: Register = on => {
       prompt: DESIGNER_PROMPT,
       effort: 'high',
     })
+    await $.agent.register({
+      name: 'researcher',
+      description:
+        'Market researcher of the agent fleet: searches the web for competing and alternative ' +
+        'products, features, books, papers, decks and videos, and returns a research brief for ' +
+        'the planner. Launch it first when the fleet plan has a researcher.',
+      prompt: RESEARCHER_PROMPT,
+      tools: ['Read', 'Bash', 'WebSearch', 'WebFetch'],
+      effort: 'high',
+    })
+    await $.agent.register({
+      name: 'security',
+      description:
+        'Security reviewer of the agent fleet: reviews the code, configuration and AI agents the ' +
+        "fleet's workers built for security problems and reports findings; read-only. Launch it " +
+        'as the very last step when the fleet plan has a security reviewer.',
+      prompt: SECURITY_PROMPT,
+      tools: ['Read', 'Bash', 'WebSearch', 'WebFetch'],
+      effort: 'high',
+    })
     await $.tool.register(PROGRESS_SPEC)
     $.clock.every(1000, async () => {
       ticks += 1
@@ -837,6 +1271,11 @@ export const register: Register = on => {
       }
       // The budget is checked every second: cost arrives in large steps as responses finish.
       if ((await read($, plan)).budgetUsd) await tickBudget($)
+      // Neither check may ever break the clock: a failure is skipped until the next round.
+      if (ticks % MEMORY_EVERY === 0) await tickMemory($).catch(() => undefined)
+      if (ticks % STALL_EVERY === 0) {
+        await tickStalls($, beats, seenBeats, rerunQueue).catch(() => undefined)
+      }
       // A peek at a running agent refreshes every five seconds.
       const peeked = await read($, peek)
       if (peeked && ticks % 5 === 0) {
@@ -877,27 +1316,33 @@ export const register: Register = on => {
       else for (const run of list.filter(one => one.status === 'running')) await stopRun($, run)
       return { text: 'Stopped the running fleet agents.' }
     }
-    if (head === 'planner' || head === 'reviewer' || head === 'designer') {
+    const leadKey: FleetLeadKey | null =
+      head === 'research' ? 'researcher' : isLeadKey(head) ? head : null
+    if (leadKey !== null) {
       const current = await read($, plan)
-      const lead =
-        head === 'planner'
-          ? plannerOf(current)
-          : head === 'reviewer'
-            ? reviewerOf(current)
-            : designerOf(current)
+      const lead = leadOf(current, leadKey)
       let chosen: FleetLead | null = null
       if (word === 'on' || word === 'off') chosen = { ...lead, isEnabled: word === 'on' }
       else if (isModel(word)) chosen = { isEnabled: true, model: word }
       if (chosen === null)
-        return { text: `Use /fleet ${head} on | off | ${LEAD_MODELS.join(' | ')}` }
+        return { text: `Use /fleet ${leadKey} on | off | ${LEAD_MODELS.join(' | ')}` }
       const value = chosen
-      await savePlan($, plan0 => ({ ...plan0, [head]: value }))
-      const name =
-        head === 'planner' ? 'Lead planner' : head === 'reviewer' ? 'Reviewer' : 'Designer'
+      await savePlan($, plan0 => ({ ...plan0, [leadKey]: value }))
+      const name = LEAD_NAME[leadKey]
       return {
         text: value.isEnabled
           ? `${name} on, running on ${modelLabel(value.model)}.`
           : `${name} off.`,
+      }
+    }
+    if (head === 'quick') {
+      if (word !== 'on' && word !== 'off') return { text: 'Use /fleet quick on | off' }
+      await savePlan($, current => ({ ...current, isQuickDirect: word === 'on' }))
+      return {
+        text:
+          word === 'on'
+            ? 'Small requests (a commit, a push, one command) are done directly, without the fleet. Start a message with "quick:" to force that for any request.'
+            : 'Every request goes to the fleet, however small.',
       }
     }
     if (head === 'auto' || head === 'files') {
@@ -935,6 +1380,89 @@ export const register: Register = on => {
       await savePlan($, current => ({ ...current, budgetUsd: usd }))
       const action = (await read($, plan)).budgetAction ?? 'warn'
       return { text: `Budget ${usdText(usd)} per request; at the limit the fleet will ${action}.` }
+    }
+    if (head === 'memory') {
+      if (word === 'off') {
+        await savePlan($, current => ({ ...current, memMinFreeMb: null }))
+        await update($, memory, () => null)
+        return { text: 'Memory guard off: agents start whatever memory is available.' }
+      }
+      if (word === 'warn' || word === 'pause' || word === 'stop') {
+        await savePlan($, current => ({ ...current, memAction: word }))
+        return {
+          text:
+            word === 'warn'
+              ? 'When memory runs low the fleet warns you; running agents carry on.'
+              : word === 'pause'
+                ? 'When memory runs low the fleet pauses running agents at their next tool call.'
+                : 'When memory runs low the fleet stops the request and its agents.',
+        }
+      }
+      if (word === 'on' || word === 'auto' || word === 'default') {
+        await savePlan($, current => {
+          const { memMinFreeMb: _dropped, ...rest } = current
+          return rest
+        })
+      } else if (word !== '') {
+        const mb = parseMemory(word)
+        if (mb === null)
+          return { text: 'Use /fleet memory 4g | 4096m | on | off | warn | pause | stop' }
+        await savePlan($, current => ({ ...current, memMinFreeMb: mb }))
+      }
+      await update($, memory, () => null)
+      const fleet = await read($, plan)
+      if (fleet.memMinFreeMb === null)
+        return { text: 'Memory guard off. /fleet memory on, or /fleet memory 4g.' }
+      const mem = await readMemory($)
+      if (mem === null) {
+        return {
+          text:
+            'Memory guard is set, but available memory cannot be read on this system (macOS ' +
+            'and Linux are supported), so it does nothing here.',
+        }
+      }
+      const limit = memoryLimitMb(fleet, mem.totalMb) ?? 0
+      return {
+        text:
+          `Memory: ${memText(mem.availMb)} available of ${memText(mem.totalMb)}. No agent starts ` +
+          `below ${memText(limit)}${fleet.memMinFreeMb == null ? ' (a tenth of the memory installed)' : ''}; ` +
+          `if it falls below that while agents run, the fleet will ${fleet.memAction ?? 'pause'}` +
+          `${(fleet.memAction ?? 'pause') === 'warn' ? ' you' : ' them'}.`,
+      }
+    }
+    if (head === 'stuck' || head === 'stall') {
+      if (word === 'off') {
+        await savePlan($, current => ({ ...current, stallMinutes: null }))
+        return { text: 'The fleet no longer looks for stuck agents.' }
+      }
+      if (word === 'warn' || word === 'tell' || word === 'restart') {
+        await savePlan($, current => ({ ...current, stallAction: word }))
+      } else if (word === 'on') {
+        await savePlan($, current => {
+          const { stallMinutes: _dropped, ...rest } = current
+          return rest
+        })
+      } else if (word !== '') {
+        const minutes = Number(word.replace(/m(in)?$/, ''))
+        if (!Number.isFinite(minutes) || minutes < 2 || minutes > 240) {
+          return { text: 'Use /fleet stuck 15 (minutes, 2 to 240) | off | warn | tell | restart' }
+        }
+        await savePlan($, current => ({ ...current, stallMinutes: minutes }))
+      }
+      const fleet = await read($, plan)
+      const minutes = stallMinutesOf(fleet)
+      if (minutes === null)
+        return { text: 'The fleet does not look for stuck agents. /fleet stuck 15 turns it on.' }
+      const action = stallActionOf(fleet)
+      return {
+        text:
+          `An agent with no activity for ${minutes} minutes counts as stuck; the fleet then ` +
+          (action === 'warn'
+            ? 'warns you and leaves it running.'
+            : action === 'tell'
+              ? 'warns you and asks Claude to check it, restart it or take over its work.'
+              : 'stops it and starts its job again once; if it gets stuck again, Claude is asked to take over.'),
+      }
     }
     if (head === 'worktrees') {
       if (word === 'on' || word === 'off') {
@@ -1023,6 +1551,11 @@ export const register: Register = on => {
     if (e.origin.kind !== 'composer') return next(e)
     if (!(await isFleetActive($)) || e.text.trimStart().startsWith('/')) return next(e)
     const fleet = await read($, plan)
+    // A commit, a push, one command: Claude does it directly. No request is opened, so no
+    // planner, no band and no run folder; the note beside the prompt says the plan is off for it.
+    if (isQuickDirectOn(fleet) && isQuickPrompt(e.text)) {
+      return next({ ...e, context: [...(e.context ?? []), QUICK_NOTE] })
+    }
 
     slotCursor = 0
     const at = await $.clock.now()
@@ -1037,6 +1570,15 @@ export const register: Register = on => {
       await $.fs.write(`${runDir}/request.md`, `# ${title}\n\n${e.text}\n`)
     }
     const usd = (await $.session.usage()).cost?.usd ?? null
+    // A security review needs to know where the project stood before the agents changed it.
+    let headAtStart: string | null = null
+    if (securityOf(fleet).isEnabled) {
+      const repo = await $.session.repo().catch(() => null)
+      if (repo) {
+        const head = await git($, ['rev-parse', 'HEAD'], repo.root).catch(() => null)
+        if (head !== null && head.exitCode === 0) headAtStart = head.stdout.trim() || null
+      }
+    }
     const request: FleetRequest = {
       id,
       title,
@@ -1051,6 +1593,8 @@ export const register: Register = on => {
       jobs: [],
       baseCommit: null,
       baseBranch: null,
+      headAtStart,
+      researchPath: null,
     }
     // A request still open from before is closed as it stood: the person moved on.
     await update($, requests, items =>
@@ -1102,19 +1646,16 @@ export const register: Register = on => {
       }
     }
     const isMain = e.parentAgentId === undefined && !e.workflow && !e.isTeammate
+    // No fleet agent starts while the laptop is short of memory.
+    if (active && isMain) {
+      const short = await memoryRefusal($, fleet).catch(() => null)
+      if (short !== null) return { deny: short }
+    }
     const rerunOf = rerunQueue.get(e.description)
     if (rerunOf) rerunQueue.delete(e.description)
     const role: FleetRole = rerunOf
       ? (rerunOf.role ?? 'worker')
-      : e.subagentType === PLANNER_TYPE
-        ? 'planner'
-        : e.subagentType === REVIEWER_TYPE
-          ? 'reviewer'
-          : e.subagentType === DESIGNER_TYPE
-            ? 'designer'
-            : active && isMain
-              ? 'worker'
-              : 'other'
+      : (leadOfType(e.subagentType) ?? (active && isMain ? 'worker' : 'other'))
     const open = isMain ? await openRequest($) : undefined
     const requestId = rerunOf?.requestId ?? open?.id ?? null
     const request = requestId
@@ -1127,7 +1668,9 @@ export const register: Register = on => {
     let outputPath: string | null = rerunOf?.outputPath ?? null
     let worktreeId: string | null = rerunOf?.worktreeId ?? null
 
-    if (role === 'planner') {
+    if (rerunOf) {
+      // A rerun is launched with its brief and the fleet's notes already in place.
+    } else if (role === 'planner') {
       // The planner takes no worker slot: it runs on its own model and is told the slots.
       const planner = plannerOf(fleet)
       const howMany = fleet.isAutoSize
@@ -1136,9 +1679,48 @@ export const register: Register = on => {
         : `Write exactly ${fleet.models.length} jobs. Job N goes to Agent N.`
       input = {
         ...e,
-        prompt: `${e.prompt}\n\nWorker slots (${fleet.models.length}):\n${slotLines(fleet).join('\n')}\n${howMany}`,
+        prompt:
+          `${e.prompt}\n\nWorker slots (${fleet.models.length}):\n${slotLines(fleet).join('\n')}\n${howMany}` +
+          (request?.researchPath
+            ? `\n\nMarket research for this request is in ${request.researchPath}. Read it before ` +
+              'you plan: build on what it recommends, cover the expected minimum it lists, and ' +
+              'aim at the gaps it found. Name that file in the brief of every job that needs it.'
+            : ''),
       }
       if (planner.model !== 'inherit') input = { ...input, model: planner.model }
+    } else if (role === 'researcher') {
+      const researcher = researcherOf(fleet)
+      if (request?.runDir) outputPath = `${request.runDir}/research.md`
+      input = { ...e, prompt: e.prompt + PROGRESS_NOTE }
+      if (researcher.model !== 'inherit') input = { ...input, model: researcher.model }
+    } else if (role === 'security') {
+      const security = securityOf(fleet)
+      if (request?.runDir) outputPath = `${request.runDir}/security-review.md`
+      const branches = (await read($, worktrees)).filter(
+        one => one.requestId === request?.id && UNMERGED.includes(one.status),
+      )
+      const note =
+        (request?.runDir
+          ? `\n\nThe run folder ${request.runDir} holds the plan (plan.md), each worker's summary ` +
+            'of what it changed (job-N.md) and the combined result; they say where to look, but ' +
+            'review the code itself.'
+          : '') +
+        (request?.headAtStart
+          ? `\nThe project was at commit ${request.headAtStart} when this request started: ` +
+            `"git status" and "git diff ${request.headAtStart}" show what changed since.`
+          : '') +
+        (branches.length > 0
+          ? '\nThe changes are on these worktree branches, not yet merged:\n' +
+            branches
+              .map(
+                one =>
+                  `- ${one.label}: branch ${one.branch} in ${one.path} ("git diff ${one.baseCommit}..${one.branch}")`,
+              )
+              .join('\n')
+          : '') +
+        PROGRESS_NOTE
+      input = { ...e, prompt: e.prompt + note }
+      if (security.model !== 'inherit') input = { ...input, model: security.model }
     } else if (role === 'reviewer') {
       const reviewer = reviewerOf(fleet)
       const files = request?.runDir
@@ -1174,8 +1756,13 @@ export const register: Register = on => {
       input = { ...e, prompt: e.prompt + note, ...(cwd ? { cwd } : {}) }
       if (designer.model !== 'inherit') input = { ...input, model: designer.model }
     } else if (role === 'worker' && !rerunOf) {
+      // A stuck agent that was stopped holds neither its job nor its slot: it may be relaunched.
       const mine = list.filter(
-        run => run.requestId === requestId && run.role === 'worker' && !isReplaced(run, list),
+        run =>
+          run.requestId === requestId &&
+          run.role === 'worker' &&
+          !isReplaced(run, list) &&
+          !isAbandoned(run),
       )
       job = jobOfPrompt(e.prompt)
       const jobs = request?.jobs ?? []
@@ -1256,6 +1843,7 @@ export const register: Register = on => {
       throw error
     }
     if (started.deny === undefined && started.agentId !== undefined) {
+      const startedAt0 = await $.clock.now()
       const run: FleetRun = {
         id: started.agentId,
         description:
@@ -1265,12 +1853,20 @@ export const register: Register = on => {
               ? `Reviewer: ${e.description || 'review'}`
               : role === 'designer'
                 ? `Designer: ${e.description || 'design'}`
-                : e.description || e.subagentType,
+                : role === 'researcher'
+                  ? `Researcher: ${e.description || 'research'}`
+                  : role === 'security'
+                    ? `Security: ${e.description || 'security review'}`
+                    : e.description || e.subagentType,
         type: e.subagentType,
         model: started.model,
         slot,
         status: 'running',
-        startedAt: await $.clock.now(),
+        startedAt: startedAt0,
+        lastActivityAt: startedAt0,
+        busyTool: null,
+        stalledAt: null,
+        stallRestarts: (rerunOf?.stallRestarts ?? 0) + (rerunOf?.stalledAt != null ? 1 : 0),
         endedAt: null,
         tools: 0,
         lastTool: null,
@@ -1281,6 +1877,10 @@ export const register: Register = on => {
         progress: null,
         task: taskOf(rerunOf?.prompt ?? e.prompt),
         prompt: rerunOf?.prompt ?? e.prompt,
+        // What the fleet appended to the brief: a rerun gets it again.
+        notes:
+          rerunOf?.notes ??
+          (input.prompt.startsWith(e.prompt) ? input.prompt.slice(e.prompt.length) : ''),
         job,
         outputPath,
         worktreeId,
@@ -1307,8 +1907,11 @@ export const register: Register = on => {
     const progress = progressFrom(e as Record<string, unknown>)
     if (agentId === undefined) return { result: 'Only fleet subagents report progress.' }
     if (progress === null) return { result: 'Give done and total as whole numbers, total ≥ 1.' }
+    const at = await $.clock.now()
     await update($, runs, list =>
-      list.map(run => (run.id === agentId ? { ...run, progress } : run)),
+      list.map(run =>
+        run.id === agentId ? { ...run, progress, lastActivityAt: at, stalledAt: null } : run,
+      ),
     )
     return { result: 'Progress recorded.' }
   })
@@ -1333,13 +1936,21 @@ export const register: Register = on => {
           consent: `The user paused the fleet agent "${run.description}".`,
         })
         .catch(() => undefined)
-      await tellMain(
-        $,
-        `The user paused "${run.description}". Do not relaunch it and do not finish the request ` +
-          'without it: the user will resume it.',
-      )
+      // A memory pause was announced to Claude once for all agents; a person's pause, here.
+      if (run.pauseReason !== 'memory') {
+        await tellMain(
+          $,
+          `The user paused "${run.description}". Do not relaunch it and do not finish the request ` +
+            'without it: the user will resume it.',
+        )
+      }
       await refreshStatus($)
-      return { deny: 'Paused by the user. Stop here; you will be told when to resume.' }
+      return {
+        deny:
+          run.pauseReason === 'memory'
+            ? "Paused by the agent fleet: the laptop's memory is low. Stop here; you will be told when to resume."
+            : 'Paused by the user. Stop here; you will be told when to resume.',
+      }
     }
     if (run?.role === 'designer') {
       const refused = designerGuard(tool)
@@ -1360,6 +1971,7 @@ export const register: Register = on => {
       }
     }
     if (run) {
+      const at = await $.clock.now()
       await update($, runs, items =>
         items.map(one =>
           one.id === agentId
@@ -1367,6 +1979,10 @@ export const register: Register = on => {
                 ...one,
                 tools: one.tools + 1,
                 lastTool: tool,
+                // Inside this call until the model's next response arrives (see tickStalls).
+                busyTool: tool,
+                lastActivityAt: at,
+                stalledAt: one.status === 'running' ? null : one.stalledAt,
                 steps: stepsAfter(one.steps ?? NO_STEPS, tool, e as Record<string, unknown>),
               }
             : one,
@@ -1375,6 +1991,20 @@ export const register: Register = on => {
     }
     return next(e)
   }).catch(($, e, next) => next(e))
+
+  // Every piece of a subagent's model response counts as a sign of life. Nothing is changed:
+  // each chunk is passed on as it came.
+  on('turn.step', async function* ($, e, next) {
+    const agentId = e.agentId
+    if (agentId === undefined) return yield* next(e)
+    const stream = next(e)
+    beats.set(agentId, (beats.get(agentId) ?? 0) + 1)
+    for await (const chunk of stream) {
+      beats.set(agentId, (beats.get(agentId) ?? 0) + 1)
+      yield chunk
+    }
+    return await stream.result
+  })
 
   on('turn.complete', async ($, e, next) => {
     const agentId = e.agentId
@@ -1398,6 +2028,7 @@ export const register: Register = on => {
                 ...one,
                 status: one.status === 'stopped' || one.status === 'paused' ? one.status : status,
                 endedAt: one.status === 'paused' ? null : at,
+                busyTool: null,
                 tokens: tokens === null ? one.tokens : (one.tokens ?? 0) + tokens,
               }
             : one,
@@ -1419,7 +2050,20 @@ export const register: Register = on => {
           }))
         }
       }
-      if (run?.worktreeId && run.status !== 'paused') {
+      if ((run?.role === 'researcher' || run?.role === 'security') && status === 'done') {
+        // The findings are kept in the run folder: the planner reads the research from there.
+        if (run.outputPath) await $.fs.write(run.outputPath, e.answer)
+        if (run.role === 'researcher' && run.requestId && run.outputPath) {
+          const researchPath = run.outputPath
+          await setRequest($, run.requestId, one => ({ ...one, researchPath }))
+        }
+      }
+      // A worktree that a restart of this agent is about to use, or already uses, is left alone.
+      const isHandedOn =
+        run !== undefined &&
+        ([...rerunQueue.values()].some(queued => queued.id === run.id) ||
+          (await read($, runs)).some(one => one.rerunOf === run.id && one.status === 'running'))
+      if (run?.worktreeId && run.status !== 'paused' && !isHandedOn) {
         const wt = (await read($, worktrees)).find(one => one.id === run.worktreeId)
         if (wt && wt.status === 'active') await finishWorktree($, wt)
       }
@@ -1427,7 +2071,9 @@ export const register: Register = on => {
         // A rerun the person started has no caller waiting; its answer goes to the conversation.
         await $.prompt.submit({
           text:
-            `[Agent fleet] The user reran "${run.description}". Its new result` +
+            ((run.stallRestarts ?? 0) > 0
+              ? `[Agent fleet] "${run.description}" replaces an agent that got stuck and was restarted by the fleet. Its result`
+              : `[Agent fleet] The user reran "${run.description}". Its new result`) +
             (run.outputPath ? ` is in ${run.outputPath}; its reply:` : ':') +
             `\n\n${e.answer}`,
         })
@@ -1441,7 +2087,11 @@ export const register: Register = on => {
     if (open !== undefined) {
       const list = await read($, runs)
       const mine = list.filter(run => run.requestId === open.id)
-      if (!mine.some(run => run.status === 'running' || run.status === 'paused')) {
+      if (mine.length === 0 && e.reason === 'answer') {
+        // Claude answered without the fleet (a small request, a question): the request leaves
+        // no trace, so nothing is announced and the history holds only real runs.
+        await update($, requests, items => items.filter(one => one.id !== open.id))
+      } else if (!mine.some(run => run.status === 'running' || run.status === 'paused')) {
         await setRequest($, open.id, one => ({
           ...one,
           endedAt: at,
@@ -1537,6 +2187,8 @@ export const register: Register = on => {
       phase === 'stopped' && (request.budgetLevel ?? 0) >= 2
         ? 'Stopped at budget'
         : PHASE_LABEL[phase]
+    const mem = await read($, memory)
+    const stuck = mine.filter(run => run.status === 'running' && run.stalledAt != null).length
     const pendingWorktrees = (await read($, worktrees)).filter(
       one => one.requestId === request.id && (one.status === 'ready' || one.status === 'conflict'),
     ).length
@@ -1548,6 +2200,10 @@ export const register: Register = on => {
       ...(tokens > 0 ? [tokensText(tokens)] : []),
       ...(request.cost ? [`${usdText(request.cost)}${budget}`] : []),
       ...(pendingWorktrees ? [`${pendingWorktrees} worktree(s) to merge`] : []),
+      ...(stuck ? [`${stuck} stuck?`] : []),
+      ...(mem?.isLow && request.endedAt === null
+        ? [`LOW MEMORY ${memText(mem.availMb)} free`]
+        : []),
     ].join(' · ')
 
     return (
@@ -1560,7 +2216,17 @@ export const register: Register = on => {
           </Text>
         </Box>
         <Box>
-          <Text color={(request.budgetLevel ?? 0) >= 2 ? 'error' : color}>{facts} </Text>
+          <Text
+            color={
+              (request.budgetLevel ?? 0) >= 2 || (mem?.isLow && request.endedAt === null)
+                ? 'error'
+                : stuck
+                  ? 'warning'
+                  : color
+            }
+          >
+            {facts}{' '}
+          </Text>
           {phase !== 'done' && phase !== 'stopped' && (
             <Button key="band-stop" label="Stop all" onPress={() => stopRequest($, request)} />
           )}
@@ -1602,6 +2268,11 @@ export const register: Register = on => {
     const planner = plannerOf(fleet)
     const reviewer = reviewerOf(fleet)
     const designer = designerOf(fleet)
+    const researcher = researcherOf(fleet)
+    const security = securityOf(fleet)
+    const mem = await read($, memory)
+    const memLimit = mem ? memoryLimitMb(fleet, mem.totalMb) : null
+    const stallMinutes = stallMinutesOf(fleet)
 
     const resize = (delta: number) =>
       savePlan($, current => {
@@ -1609,18 +2280,12 @@ export const register: Register = on => {
         const models = Array.from({ length: count }, (_, i) => current.models[i] ?? 'inherit')
         return { ...current, models }
       })
-    const leadOf = (current: FleetPlan, key: 'planner' | 'reviewer' | 'designer') =>
-      key === 'planner'
-        ? plannerOf(current)
-        : key === 'reviewer'
-          ? reviewerOf(current)
-          : designerOf(current)
-    const toggleLead = (key: 'planner' | 'reviewer' | 'designer') =>
+    const toggleLead = (key: FleetLeadKey) =>
       savePlan($, current => {
         const lead = leadOf(current, key)
         return { ...current, [key]: { ...lead, isEnabled: !lead.isEnabled } }
       })
-    const cycleLead = (key: 'planner' | 'reviewer' | 'designer') =>
+    const cycleLead = (key: FleetLeadKey) =>
       savePlan($, current => {
         const lead = leadOf(current, key)
         return { ...current, [key]: { ...lead, model: nextLeadModel(lead.model) } }
@@ -1651,9 +2316,14 @@ export const register: Register = on => {
       const replaced = isReplaced(run, list)
       const detail =
         run.status === 'paused'
-          ? 'paused — press resume to continue'
+          ? run.pauseReason === 'memory'
+            ? 'paused: memory is low — free memory, then resume'
+            : 'paused — press resume to continue'
           : run.status === 'running'
-            ? (run.pauseRequested ? 'pausing at the next tool call · ' : '') +
+            ? (run.stalledAt != null
+                ? `STUCK? silent ${elapsedText(run.lastActivityAt ?? run.startedAt, at)} · `
+                : '') +
+              (run.pauseRequested ? 'pausing at the next tool call · ' : '') +
               (run.progress?.step || run.lastTool || 'starting')
             : replaced
               ? 'replaced by rerun'
@@ -1680,7 +2350,15 @@ export const register: Register = on => {
             </Text>
           </Box>
           <Box columnGap={1}>
-            <Text color={STATUS_COLOR[run.status]} dimColor wrap="truncate-end">
+            <Text
+              color={
+                run.stalledAt != null && run.status === 'running'
+                  ? 'warning'
+                  : STATUS_COLOR[run.status]
+              }
+              dimColor={!(run.stalledAt != null && run.status === 'running')}
+              wrap="truncate-end"
+            >
               {`${NB.repeat(5)}${fit(`${detail} · ${run.tools} tools`, Math.max(10, inner - 30))}`}
             </Text>
             <Button
@@ -1757,7 +2435,7 @@ export const register: Register = on => {
       Math.floor(
         (rows -
           fleet.models.length -
-          20 -
+          23 -
           earlier.length -
           unmerged.length -
           (showHelp ? HELP_LINES.length + 2 : 0) -
@@ -1849,7 +2527,7 @@ export const register: Register = on => {
       </Box>
     )
     const leadRow = (
-      key: 'planner' | 'reviewer' | 'designer',
+      key: FleetLeadKey,
       name: string,
       lead: FleetLead,
       keys: [string, string],
@@ -1857,7 +2535,7 @@ export const register: Register = on => {
     ) => (
       <Box columnGap={1}>
         <Text color={ROLE_COLOR[key]} bold>
-          {fit(name, 9)}
+          {fit(name, 10)}
         </Text>
         <Button
           key={key}
@@ -1937,6 +2615,13 @@ export const register: Register = on => {
           ink,
           <>
             {leadRow(
+              'researcher',
+              'Researcher',
+              researcher,
+              ['i', 'j'],
+              'web research on what exists, before the plan',
+            )}
+            {leadRow(
               'planner',
               'Planner',
               planner,
@@ -1950,6 +2635,13 @@ export const register: Register = on => {
               designer,
               ['d', 'n'],
               'polishes into files, uploads nothing',
+            )}
+            {leadRow(
+              'security',
+              'Security',
+              security,
+              ['k', 'z'],
+              'security review of what was built, last',
             )}
           </>,
         )}
@@ -2054,6 +2746,18 @@ export const register: Register = on => {
                   ? `${usdText(fleet.budgetUsd)} per request · ${fleet.budgetAction ?? 'warn'} at the limit`
                   : 'none'
               }  ·  notify ${fleet.notify ?? 'all'}  ·  set with /fleet budget, /fleet notify`}
+            </Text>
+            <Text color={mem?.isLow ? 'error' : ink} dimColor={!mem?.isLow} wrap="truncate-end">
+              {`Memory ${
+                fleet.memMinFreeMb === null
+                  ? 'guard off'
+                  : `keep ${memLimit !== null ? memText(memLimit) : fleet.memMinFreeMb != null ? memText(fleet.memMinFreeMb) : 'a tenth'} free · ${fleet.memAction ?? 'pause'} when low` +
+                    (mem ? ` · ${memText(mem.availMb)} free now` : '')
+              }  ·  small requests ${isQuickDirectOn(fleet) ? 'direct' : 'to the fleet'}  ·  stuck ${
+                stallMinutes === null
+                  ? 'check off'
+                  : `after ${stallMinutes}m · ${stallActionOf(fleet)}`
+              }  ·  /fleet memory, /fleet stuck`}
             </Text>
           </>,
         )}

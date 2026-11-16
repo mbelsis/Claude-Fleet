@@ -31,6 +31,17 @@ import {
   DESIGNER_TYPE,
   titleOf,
   compactLine,
+  parseMemory,
+  memoryFromSysctl,
+  memoryFromMeminfo,
+  memoryLimitMb,
+  isMemoryLow,
+  stalledFor,
+  isAbandoned,
+  RESEARCHER_TYPE,
+  SECURITY_TYPE,
+  isQuickPrompt,
+  QUICK_NOTE,
 } from '../hooks/register'
 
 // The kit's `$` takes an event's full input; the plugin's calls take the short form.
@@ -1066,4 +1077,463 @@ test('workers launched together take different slots and models', async ($, on) 
   expect(all.map(one => one.model).sort()).toEqual(['opus', 'sonnet', 'sonnet'])
   const fourth = await $.agent.spawn({ prompt: 'd', description: 'd' } as never)
   expect(fourth.deny).toContain('allows 3 workers')
+})
+
+test('memory amounts, readings and the limit', async () => {
+  expect(parseMemory('4g')).toBe(4096)
+  expect(parseMemory('2.5gb')).toBe(2560)
+  expect(parseMemory('4096m')).toBe(4096)
+  expect(parseMemory('8')).toBe(8192)
+  expect(parseMemory('3000')).toBe(3000)
+  expect(parseMemory('lots')).toBe(null)
+  // macOS: the kernel's percentage available, and the bytes installed.
+  expect(memoryFromSysctl('50\n25769803776\n')).toEqual({ availMb: 12288, totalMb: 24576 })
+  expect(memoryFromSysctl('abc123\n')).toBe(null)
+  expect(memoryFromMeminfo('MemTotal:       16384000 kB\nMemAvailable:    4096000 kB\n')).toEqual({
+    availMb: 4000,
+    totalMb: 16000,
+  })
+  const fleet = { isEnabled: true, models: [] }
+  expect(memoryLimitMb(fleet, 24576)).toBe(2458)
+  expect(memoryLimitMb(fleet, 8192)).toBe(1024)
+  expect(memoryLimitMb({ ...fleet, memMinFreeMb: 4096 }, 24576)).toBe(4096)
+  expect(memoryLimitMb({ ...fleet, memMinFreeMb: null }, 24576)).toBe(null)
+  // Once low, memory stays low until it is a quarter above the limit.
+  expect(isMemoryLow(900, 1000, false)).toBe(true)
+  expect(isMemoryLow(1100, 1000, false)).toBe(false)
+  expect(isMemoryLow(1100, 1000, true)).toBe(true)
+  expect(isMemoryLow(1300, 1000, true)).toBe(false)
+})
+
+test('an agent counts as stuck after the limit, and a waiting one after three times it', async () => {
+  const run = { status: 'running' as const, startedAt: 0, lastActivityAt: 60_000 }
+  expect(stalledFor(run, 10 * 60_000, 15)).toBe(null)
+  expect(stalledFor(run, 16 * 60_000, 15)).toBe(15 * 60_000)
+  expect(stalledFor({ ...run, busyTool: 'Agent' }, 16 * 60_000, 15)).toBe(null)
+  expect(stalledFor({ ...run, busyTool: 'Bash' }, 16 * 60_000, 15)).toBe(15 * 60_000)
+  expect(stalledFor(run, 16 * 60_000, 15, true)).toBe(null)
+  expect(stalledFor(run, 50 * 60_000, 15, true)).toBe(49 * 60_000)
+  expect(stalledFor({ ...run, pauseRequested: true }, 16 * 60_000, 15)).toBe(null)
+  expect(stalledFor({ ...run, status: 'paused' as const }, 16 * 60_000, 15)).toBe(null)
+  expect(isAbandoned({ status: 'stopped', stalledAt: 5 })).toBe(true)
+  expect(isAbandoned({ status: 'stopped', stalledAt: null })).toBe(false)
+  expect(isAbandoned({ status: 'running', stalledAt: 5 })).toBe(false)
+})
+
+/** A host whose memory the test sets: `level` is the percentage macOS reports as available. */
+function memoryHost(on: On, memory: { level: number }) {
+  const stops: string[] = []
+  const notes: string[] = []
+  const logs: string[] = []
+  const submitted: string[] = []
+  const spawned: { description: string; prompt: string; model: string }[] = []
+  const written: Record<string, string> = {}
+  const contexts: string[][] = []
+  on('session.repo', () => ({ value: { root: '/repo', remote: null, internal: false } }) as never)
+  on('session.root', () => ({ value: '/repo' }) as never)
+  on('env.get', () => ({ value: '/home/u' }) as never)
+  on('fs.write', (_$, e) => {
+    const file = e as unknown as { path: string; text: string }
+    written[file.path] = String(file.text)
+    return { value: undefined } as never
+  })
+  on('audio.play', () => ({ value: undefined }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('ui.status', () => ({ value: undefined }) as never)
+  // What the plugin registers when the session starts, which is what starts its clock.
+  on('command.register', () => ({ value: { command: 'fleet' } }) as never)
+  on('agent.register', () => ({ value: undefined }) as never)
+  on('tool.register', () => ({ value: undefined }) as never)
+  on(
+    'agent.list',
+    () =>
+      ({
+        value: spawned.map((one, i) => ({
+          id: `m${i + 1}`,
+          description: one.description,
+          type: 'general-purpose',
+          status: 'running',
+        })),
+      }) as never,
+  )
+  on('session.start', (_$, e) => ({ cwd: (e as { cwd: string }).cwd }) as never)
+  on(
+    'ui.log',
+    (_$, e) => (logs.push(String((e as { text?: string }).text)), { value: undefined }) as never,
+  )
+  on(
+    'session.usage',
+    () => ({ value: { startedAt: 0, context: {}, rateLimits: [], cost: { usd: 0 } } }) as never,
+  )
+  on('session.append', (_$, e, next) => {
+    const content = (e as unknown as { message: { content: { text: string }[] } }).message.content
+    notes.push(content.map(block => block.text).join(''))
+    return next(e)
+  })
+  on('process.run', (_$, e) => {
+    const argv = (e as { argv: string[] }).argv
+    const stdout =
+      argv[0] === 'sysctl'
+        ? `${memory.level}\n25769803776\n`
+        : argv.join(' ') === 'git rev-parse HEAD'
+          ? 'abc123\n'
+          : ''
+    return {
+      value: {
+        exitCode: 0,
+        stdout,
+        stderr: '',
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    } as never
+  })
+  on('tool.call', (_$, e) => {
+    const call = e as unknown as { tool: string; task_id?: string }
+    if (call.tool === 'TaskStop') stops.push(String(call.task_id))
+    return { result: `ran ${call.tool}` } as never
+  })
+  on('prompt.submit', (_$, e) => {
+    contexts.push([...((e as { context?: string[] }).context ?? [])])
+    if ((e as { origin?: { kind?: string } }).origin?.kind !== 'composer') {
+      submitted.push(String((e as { text: string }).text))
+    }
+    return e as never
+  })
+  on('turn.complete', (_$, e) => ({ text: (e as { answer: string }).answer }))
+  on('agent.spawn', (_$, e) => {
+    spawned.push({ description: e.description, prompt: e.prompt, model: e.model ?? 'parent' })
+    return { model: e.model ?? 'parent', agentId: `m${spawned.length}` }
+  })
+  return { stops, notes, logs, submitted, spawned, written, contexts }
+}
+
+test('no agent starts while memory is below the limit', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on)
+  const memory = { level: 4 }
+  const world = memoryHost(on, memory)
+  await $.command.run({ command: 'fleet', args: '2 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  const set = await $.command.run({ command: 'fleet', args: 'memory 4g' } as never)
+  expect(set.text).toContain('No agent starts below 4.0 GB')
+  await $.prompt.submit(composer('Build it'))
+
+  const refused = await $.agent.spawn({ prompt: 'a', description: 'first' } as never)
+  expect(refused.deny).toContain('memory is available')
+  expect(world.spawned).toEqual([])
+
+  // With memory free again the same launch goes through.
+  memory.level = 60
+  await clock.advance(4_000)
+  const started = await $.agent.spawn({ prompt: 'a', description: 'first' } as never)
+  expect(started.deny).toBeUndefined()
+
+  // Off, the guard never reads memory.
+  memory.level = 1
+  await $.command.run({ command: 'fleet', args: 'memory off' } as never)
+  const free = await $.agent.spawn({ prompt: 'b', description: 'second' } as never)
+  expect(free.deny).toBeUndefined()
+})
+
+test('when memory runs low, running agents pause at their next tool call', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on)
+  const memory = { level: 60 }
+  const world = memoryHost(on, memory)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+  await $.command.run({ command: 'fleet', args: '1 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  await $.command.run({ command: 'fleet', args: 'stuck off' } as never)
+  await $.prompt.submit(composer('Build it'))
+  const agent = await $.agent.spawn({ prompt: 'work', description: 'worker' } as never)
+  const fine = await $.tool.call({ tool: 'Read', agentId: agent.agentId, file_path: '/x' } as never)
+  expect((fine as { deny?: string }).deny).toBeUndefined()
+
+  memory.level = 3
+  await clock.advance(11_000)
+  expect(world.logs.some(line => line.includes('of memory is available'))).toBe(true)
+  expect(world.notes.some(note => note.includes('Memory on the user'))).toBe(true)
+  const refused = await $.tool.call({
+    tool: 'Read',
+    agentId: agent.agentId,
+    file_path: '/y',
+  } as never)
+  expect((refused as { deny?: string }).deny).toContain('memory is low')
+  expect(world.stops).toEqual([agent.agentId])
+})
+
+test('a stuck agent is stopped and restarted once; stuck again, Claude is asked to take over', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on)
+  const world = memoryHost(on, { level: 60 })
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+  await $.command.run({ command: 'fleet', args: '1 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  const set = await $.command.run({ command: 'fleet', args: 'stuck 10' } as never)
+  expect(set.text).toContain('no activity for 10 minutes')
+  await $.prompt.submit(composer('Build it'))
+  const agent = await $.agent.spawn({
+    prompt: '## Job 1: Build\nGoal.',
+    description: 'builder',
+  } as never)
+
+  // Activity resets the count: nine minutes, a tool call, nine more minutes is not stuck.
+  await clock.advance(9 * 60_000)
+  await $.tool.call({ tool: 'Bash', agentId: agent.agentId, command: 'npm test' } as never)
+  await clock.advance(9 * 60_000)
+  expect(world.stops).toEqual([])
+
+  await clock.advance(2 * 60_000)
+  expect(world.stops).toEqual([agent.agentId])
+  expect(world.spawned.at(-1)?.description).toBe('builder (rerun)')
+  expect(world.spawned.at(-1)?.prompt).toContain('stopped moving')
+  // The restarted agent still knows where to write its result.
+  expect(world.spawned.at(-1)?.prompt).toContain('Delivery: write your complete result')
+  expect(world.spawned.at(-1)?.prompt).toContain('inside a Bash call')
+  expect(world.notes.some(note => note.includes('Do not relaunch it'))).toBe(true)
+  expect(world.submitted).toEqual([])
+
+  // The restarted agent gets stuck too: no second restart, Claude is woken instead.
+  await clock.advance(11 * 60_000)
+  expect(world.spawned.length).toBe(2)
+  expect(world.submitted.at(-1)).toContain('probably stuck')
+  expect(world.submitted.at(-1)).toContain('already restarted this job once')
+})
+
+test('with "stuck tell" Claude may launch a stuck job again once it has stopped it', async ($, on) => {
+  mock.store(on)
+  const clock = mock.clock(on)
+  const world = memoryHost(on, { level: 60 })
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true } as never)
+  await $.command.run({ command: 'fleet', args: '1 haiku' } as never)
+  await $.command.run({ command: 'fleet', args: 'planner off' } as never)
+  await $.command.run({ command: 'fleet', args: 'stuck tell' } as never)
+  await $.prompt.submit(composer('Build it'))
+  const agent = await $.agent.spawn({
+    prompt: '## Job 1: Build\nGoal.',
+    description: 'builder',
+  } as never)
+  await clock.advance(16 * 60_000)
+  expect(world.stops).toEqual([])
+  expect(world.submitted.at(-1)).toContain('probably stuck')
+
+  const early = await $.agent.spawn({
+    prompt: '## Job 1: Build\nGoal.',
+    description: 'again',
+  } as never)
+  expect(early.deny).toContain('already been launched')
+  await $.turn.complete({
+    answer: '',
+    agentId: agent.agentId,
+    reason: 'aborted',
+    durationMs: 1,
+    isAborted: true,
+    turnId: 't',
+  } as never)
+  const again = await $.agent.spawn({
+    prompt: '## Job 1: Build\nGoal.',
+    description: 'again',
+  } as never)
+  expect(again.deny).toBeUndefined()
+})
+
+test('the researcher runs first on its own model, and its findings reach the planner', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  const world = memoryHost(on, { level: 60 })
+  await $.command.run({ command: 'fleet', args: '2 sonnet' } as never)
+  const on1 = await $.command.run({ command: 'fleet', args: 'researcher on' } as never)
+  expect(on1.text).toBe('Researcher on, running on sonnet.')
+  const fleet = {
+    isEnabled: true,
+    models: ['sonnet' as const],
+    researcher: { isEnabled: true, model: 'sonnet' as const },
+  }
+  expect(promptReminder(fleet)).toContain(RESEARCHER_TYPE)
+  expect(promptReminder(fleet).indexOf(RESEARCHER_TYPE)).toBeLessThan(
+    promptReminder(fleet).indexOf(PLANNER_TYPE),
+  )
+  expect(planText({ isEnabled: true, models: ['sonnet'] })).not.toContain(RESEARCHER_TYPE)
+
+  await $.prompt.submit(composer('A GRC tool for mid-sized companies'))
+  const researcher = await $.agent.spawn({
+    prompt: 'Idea: a GRC tool',
+    description: 'market',
+    subagentType: RESEARCHER_TYPE,
+  } as never)
+  expect(researcher.model).toBe('sonnet')
+  await $.turn.complete({
+    answer: '## Summary\nThree competitors.',
+    agentId: researcher.agentId,
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 't',
+  } as never)
+  const file = Object.keys(world.written).find(path => path.endsWith('/research.md'))
+  expect(file).toBeDefined()
+  expect(world.written[file!]).toContain('Three competitors')
+
+  await $.agent.spawn({
+    prompt: 'Plan it',
+    description: 'plan',
+    subagentType: PLANNER_TYPE,
+  } as never)
+  expect(world.spawned.at(-1)?.prompt).toContain(file!)
+  expect(world.spawned.at(-1)?.prompt).toContain('Market research')
+  // The researcher took no worker slot.
+  const one = await $.agent.spawn({ prompt: '## Job 1: A\nGoal.', description: 'a' } as never)
+  const two = await $.agent.spawn({ prompt: '## Job 2: B\nGoal.', description: 'b' } as never)
+  expect(one.deny).toBeUndefined()
+  expect(two.deny).toBeUndefined()
+})
+
+test('the security reviewer runs last, is told where the changes are, and its report is kept', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  const world = memoryHost(on, { level: 60 })
+  await $.command.run({ command: 'fleet', args: '1 sonnet' } as never)
+  await $.command.run({ command: 'fleet', args: 'security fable' } as never)
+  const fleet = {
+    isEnabled: true,
+    models: ['sonnet' as const],
+    designer: { isEnabled: true, model: 'opus' as const },
+    security: { isEnabled: true, model: 'opus' as const },
+  }
+  expect(planText(fleet).indexOf(SECURITY_TYPE)).toBeGreaterThan(
+    planText(fleet).indexOf(DESIGNER_TYPE),
+  )
+  await $.prompt.submit(composer('Add a login endpoint'))
+  const security = await $.agent.spawn({
+    prompt: 'Built: login endpoint in src/auth.ts',
+    description: 'login',
+    subagentType: SECURITY_TYPE,
+  } as never)
+  expect(security.model).toBe('fable')
+  expect(world.spawned.at(-1)?.prompt).toContain('git diff abc123')
+  await $.turn.complete({
+    answer: '## Verdict\nDo not ship before fixing.',
+    agentId: security.agentId,
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 't',
+  } as never)
+  const file = Object.keys(world.written).find(path => path.endsWith('/security-review.md'))
+  expect(world.written[file!]).toContain('Do not ship')
+  const list: FleetRun[] = [
+    {
+      id: 's',
+      description: 'Security: login',
+      type: SECURITY_TYPE,
+      model: 'fable',
+      slot: null,
+      status: 'running',
+      startedAt: 0,
+      endedAt: null,
+      tools: 0,
+      lastTool: null,
+      tokens: null,
+      steps: EMPTY,
+      role: 'security',
+      requestId: 'r',
+    },
+  ]
+  const request = {
+    id: 'r',
+    title: 't',
+    startedAt: 0,
+    endedAt: null,
+    expectedWorkers: 1,
+  } as FleetRequest
+  expect(phaseOf({ ...request, outcome: 'open' }, list)).toBe('securing')
+})
+
+test('the pane has a row for the researcher and the security reviewer', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  await $.command.run({ command: 'fleet', args: '2 haiku' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'agent-fleet',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'agent-fleet',
+    props: { bodyColumns: 100 },
+    viewport: { columns: 140, rows: 50 },
+  } as never)
+  expect((await ui.find({ key: 'researcher' }))?.text).toContain('off')
+  await ui.press({ key: 'researcher' })
+  expect((await ui.find({ key: 'researcher' }))?.text).toContain('on')
+  expect((await ui.find({ key: 'security-model' }))?.text).toContain('opus')
+  await ui.press({ key: 'security-model' })
+  expect((await ui.find({ key: 'security-model' }))?.text).toContain('fable')
+  await ui.unmount()
+})
+
+test('a commit or a push is a small request; real work is not', async () => {
+  for (const text of [
+    'commit please',
+    'push to git',
+    'commit and push',
+    'please open a PR',
+    'git status',
+    'quick: rename the helper in utils.ts',
+  ]) {
+    expect(isQuickPrompt(text)).toBe(true)
+  }
+  for (const text of [
+    'write a commit hook that checks the message format',
+    'fix the merge conflicts',
+    'Build a GRC tool for mid-sized companies',
+    'commit, then implement the login page',
+    'commit <pasted_content id="1">x</pasted_content>',
+  ]) {
+    expect(isQuickPrompt(text)).toBe(false)
+  }
+})
+
+test('a small request opens no fleet request and tells Claude to do it directly', async ($, on) => {
+  mock.store(on)
+  mock.clock(on)
+  const world = memoryHost(on, { level: 60 })
+  const contexts = world.contexts
+  await $.command.run({ command: 'fleet', args: '2 haiku' } as never)
+
+  await $.prompt.submit(composer('commit please'))
+  expect(contexts.at(-1)).toEqual([QUICK_NOTE])
+  expect(Object.keys(world.written)).toEqual([])
+  // Nothing was opened, so the main turn ending records nothing.
+  await $.turn.complete({
+    answer: 'done',
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 'm',
+  } as never)
+  expect((await $.command.run({ command: 'fleet', args: 'history' } as never)).text).toContain(
+    'No finished',
+  )
+
+  // Real work still goes to the fleet, and the rule for small requests travels with it.
+  await $.prompt.submit(composer('Build the reporting module'))
+  expect(contexts.at(-1)?.[0]).toContain('Agent fleet is ON')
+  expect(contexts.at(-1)?.[0]).toContain('Small requests do not go to the fleet')
+  // A request Claude answered without any agent leaves no history either.
+  await $.turn.complete({
+    answer: 'done',
+    reason: 'answer',
+    durationMs: 1,
+    isAborted: false,
+    turnId: 'm',
+  } as never)
+  expect((await $.command.run({ command: 'fleet', args: 'history' } as never)).text).toContain(
+    'No finished',
+  )
+
+  // Switched off, every request goes to the fleet again.
+  await $.command.run({ command: 'fleet', args: 'quick off' } as never)
+  await $.prompt.submit(composer('commit please'))
+  expect(contexts.at(-1)?.[0]).toContain('Agent fleet is ON')
+  expect(contexts.at(-1)?.[0]).not.toContain('Small requests')
 })
