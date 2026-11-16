@@ -272,7 +272,7 @@ Uninstalling leaves your run folders (`~/.claude/fleet-runs/`) and any fleet wor
 /fleet help                show this list
 ```
 
-Pane keys: `t` plan · `u` this project · `i`/`j` researcher · `p`/`o` planner · `r`/`e` reviewer · `d`/`n` designer · `k`/`z` security · `f`/`m` fewer/more workers · `a` count · `1–9` agent model · `l` files · `w` worktrees · `v` messages · `b` colours · `x` pause or resume all · `s` stop all · `c` clear · `y` history · `g` merge · `h` help.
+Pane keys: `t` plan · `u` skip this project · `i`/`j` researcher · `p`/`o` planner · `r`/`e` reviewer · `d`/`n` designer · `k`/`z` security · `f`/`m` fewer/more workers · `a` count · `1–9` agent model · `l` files · `w` worktrees · `v` messages · `b` colours · `x` pause or resume all · `s` stop all · `c` clear · `y` history · `g` merge · `h` help.
 
 ## Develop
 

@@ -2478,7 +2478,7 @@ export const register: Register = on => {
       Math.floor(
         (rows -
           fleet.models.length -
-          23 -
+          24 -
           earlier.length -
           unmerged.length -
           (showHelp ? HELP_LINES.length + 2 : 0) -
@@ -2624,14 +2624,11 @@ export const register: Register = on => {
             label={fleet.isEnabled ? '● on' : '○ off'}
             onPress={() => savePlan($, current => ({ ...current, isEnabled: !current.isEnabled }))}
           />
-          <Text color={ink} dimColor>
-            this project
-          </Text>
           <Button
             key="project"
             hotkey="u"
-            variant={projectOff ? 'secondary' : 'primary'}
-            label={onOff(!projectOff)}
+            variant={projectOff ? 'primary' : 'secondary'}
+            label={projectOff ? '☑ skip this project' : '☐ skip this project'}
             onPress={toggleProject}
           />
           <Button
@@ -2649,9 +2646,16 @@ export const register: Register = on => {
             onPress={cycleTheme}
           />
         </Box>
-        {projectOff && (
-          <Text color="warning">The fleet is off for this project (/fleet use on).</Text>
-        )}
+        <Text
+          color={fleet.isEnabled && !projectOff ? 'success' : 'warning'}
+          wrap="truncate-end"
+        >
+          {!fleet.isEnabled
+            ? 'Off everywhere: the settings below are not applied and agents run unmanaged (t).'
+            : projectOff
+              ? 'On, but skipped in this project: nothing below is applied here (u).'
+              : 'On in this project.'}
+        </Text>
 
         {card(
           'Lead agents',
